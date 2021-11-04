@@ -117,10 +117,20 @@ class DecayChainViewer:
             label += "{tr}</TABLE>>".format(tr="" if add_tags else "</TR>")
             return label
 
-        def new_node_no_subchain(list_parts):
+        def new_node_no_subchain(list_parts, _eff_bf, _show_eff=True):
             label = html_table_label(list_parts, bgcolor="#eef3f8")
             r = f"dec{next(counter)}"
+            r_bf = f"bf{next(counter)}"
             self.graph.node(r, label=label, style="filled", fillcolor="#eef3f8")
+            if _show_eff:
+                self.graph.node(
+                    r_bf,
+                    label=f"  {_eff_bf:.2E}",
+                    shape="plain",
+                    fontcolor="#ff6000",
+                    fontsize="12",
+                )
+                self.graph.edge(r, r_bf, arrowhead="none", style="dotted", color="#ff6000")
             return r
 
         def new_node_with_subchain(list_parts):
@@ -132,7 +142,10 @@ class DecayChainViewer:
             self.graph.node(r, shape="none", label=label)
             return r
 
-        def iterate_chain(subchain, top_node=None, link_pos=None):
+        def iterate_chain(
+            subchain, top_node=None, link_pos=None, _eff_bf=1.0, _total_eff_bf=0.0,
+            _show_eff=True
+        ):
             if not top_node:
                 top_node = "mother"
                 self.graph.node("mother", shape="none", label=label)
@@ -140,27 +153,55 @@ class DecayChainViewer:
             for idm in range(n_decaymodes):
                 _list_parts = subchain[idm]["fs"]
                 if not has_subdecay(_list_parts):
-                    _ref = new_node_no_subchain(_list_parts)
                     _bf = subchain[idm]["bf"]
+                    _ref = new_node_no_subchain(_list_parts, _eff_bf=_eff_bf * _bf,
+                                                _show_eff=_show_eff)
+                    _total_eff_bf += _eff_bf * _bf
                     if link_pos is None:
-                        self.graph.edge(top_node, _ref, label=str(_bf))
+                        self.graph.edge(top_node, _ref, label=f"{_bf*100:.2f} %")
                     else:
-                        self.graph.edge(f"{top_node}:p{link_pos}", _ref, label=str(_bf))
+                        self.graph.edge(
+                            f"{top_node}:p{link_pos}",
+                            _ref,
+                            label=f"{_bf*100:.2f} %",
+                        )
                 else:
                     _ref_1 = new_node_with_subchain(_list_parts)
                     _bf_1 = subchain[idm]["bf"]
                     if link_pos is None:
-                        self.graph.edge(top_node, _ref_1, label=str(_bf_1))
+                        self.graph.edge(top_node, _ref_1, label=f"{_bf_1*100:.2f} %")
                     else:
                         self.graph.edge(
                             f"{top_node}:p{link_pos}",
                             _ref_1,
-                            label=str(_bf_1),
+                            label=f"{_bf_1*100:.2f} %",
                         )
+                    _iter_eff_bf = 1.0
+                    _c = 0
+                    max_l = len([_p for _p in _list_parts if not isinstance(_p, str)])
                     for i, _p in enumerate(_list_parts):
                         if not isinstance(_p, str):
                             _k = list(_p.keys())[0]
-                            iterate_chain(_p[_k], top_node=_ref_1, link_pos=i)
+                            if _c == max_l-1:
+                                _total_eff_bf = iterate_chain(
+                                    _p[_k],
+                                    top_node=_ref_1,
+                                    link_pos=i,
+                                    _eff_bf=_iter_eff_bf * _eff_bf * _bf_1,
+                                    _total_eff_bf=_total_eff_bf,
+                                )
+                            else:
+                                _iter_eff_bf = iterate_chain(
+                                    _p[_k],
+                                    top_node=_ref_1,
+                                    link_pos=i,
+                                    _eff_bf=_iter_eff_bf * _eff_bf,
+                                    _total_eff_bf=0,
+                                     _show_eff=False
+                                )
+                            _c += 1
+
+            return _total_eff_bf
 
         def has_subdecay(ds):
             return not all(isinstance(p, str) for p in ds)
@@ -170,7 +211,15 @@ class DecayChainViewer:
         sc = self._chain[k]
 
         # Actually build the whole decay chain, iteratively
-        iterate_chain(sc)
+        _total_eff_bf = iterate_chain(sc)
+        print(f'Total BF shown: {_total_eff_bf*100:.2f}%')
+        self.graph.node(
+            "Total Effective BF",
+            label=f"Total: {_total_eff_bf:.2E}\n = {_total_eff_bf*100:.2f} %",
+            shape="diamond",
+            fontcolor="#ff6000",
+            fontsize="12",
+        )
 
     @property
     def graph(self):
@@ -234,7 +283,7 @@ class DecayChainViewer:
         return dict(fontname="Helvetica", fontsize="11", shape="oval")
 
     def _get_edge_defaults(self):
-        return dict(fontcolor="#4c4c4c", fontsize="11")
+        return dict(fontcolor="#4c4c4c", fontname="Helvetica", fontsize="11")
 
     def _repr_svg_(self):
         """
