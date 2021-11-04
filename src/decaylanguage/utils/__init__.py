@@ -2,7 +2,7 @@
 
 from .errors import LineFailure
 from .particleutils import charge_conjugate_name
-from .utilities import filter_lines, iter_flatten, split
+from .utilities import filter_lines, iter_flatten, split, containedInFirst
 
 __all__ = (
     "LineFailure",
@@ -10,6 +10,7 @@ __all__ = (
     "split",
     "filter_lines",
     "charge_conjugate_name",
+    "containedInFirst",
 )
 
 

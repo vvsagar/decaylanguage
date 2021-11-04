@@ -5,6 +5,7 @@
 # or https://github.com/scikit-hep/decaylanguage for details.
 
 from __future__ import absolute_import, division, print_function
+from collections import Counter
 
 
 def iter_flatten(iterable):
@@ -55,3 +56,13 @@ def filter_lines(matcher, inp):
     ]
     new_inp = [ln for ln in inp if matcher.match(ln) is None]
     return output, new_inp
+
+def containedInFirst(a, b):
+  a_count = Counter(a)
+  b_count = Counter(b)
+  for key in b_count:
+    if key not in a_count.keys():
+      return False
+    if b_count[key] > a_count[key]:
+      return False
+  return True
