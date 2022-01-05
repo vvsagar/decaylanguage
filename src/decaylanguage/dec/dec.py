@@ -847,9 +847,9 @@ All but the first occurrence will be discarded/removed ...""".format(
 
         return {mother: info}
 
-    def build_decay_chains_to_inclusive_fsp(self, mother, fsp, stable_particles=(),
-                                            multi=True,
-                                            only_direct_daughters=False):
+    def build_decay_chains_to_inclusive_fsp(
+        self, mother, fsp, stable_particles=(), multi=True, only_direct_daughters=False
+    ):
         """
         Iteratively build the entire inclusive decay chains of a given mother
         particle (M), optionally considering, on the fly, certain particles as stable.
@@ -916,12 +916,12 @@ All but the first occurrence will be discarded/removed ...""".format(
                             # if fs does not have decays defined in the parsed file
                             # _n_dms = len(self._find_decay_modes(fs))
 
-                            _info = self.build_decay_chains_to_inclusive_fsp(mother=fs,
-                                                                            fsp=fsp,
-                                                                            stable_particles=stable_particles)
+                            _info = self.build_decay_chains_to_inclusive_fsp(
+                                mother=fs, fsp=fsp, stable_particles=stable_particles
+                            )
                             if len(_info[f"{fs}"]) > 0:
                                 d["fs"][i] = _info
-                                append=True
+                                append = True
                         except DecayNotFound:
                             pass
                     if append:
