@@ -121,4 +121,4 @@ class ModelDecay:
             return d
 
         def _repr_svg_(self):
-            return self._make_graphviz()._repr_svg_()
+            return self._make_graphviz()._repr_image_svg_xml()
