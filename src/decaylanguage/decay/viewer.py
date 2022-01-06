@@ -15,6 +15,8 @@ import graphviz
 from particle import latex_to_html_name
 from particle.converters.bimap import DirectionalMaps
 
+import pandas
+
 counter = iter(itertools.count())
 
 
@@ -290,3 +292,115 @@ class DecayChainViewer:
         IPython display in SVG format.
         """
         return self._graph._repr_image_svg_xml()
+
+
+class DecayChainToTable:
+    """
+    The class to tabulate a decay chain.
+
+    Examples
+    --------
+    >>> dfp = DecFileParser('my-Dst-decay-file.dec')
+    >>> dfp.parse()
+    >>> chain = dfp.build_decay_chains('D*+')
+    >>> df = DecayChainToTable(chain).table
+    >>> df  # display the pandas in a notebook
+    """
+
+    __slots__ = ("_chain", "_df")
+
+    def __init__(self, decaychain):
+        """
+        Default constructor.
+
+        Parameters
+        ----------
+        decaychain: dict
+            Input decay chain in dict format, typically created from `decaylanguage.DecFileParser.build_decay_chains`
+            after parsing a .dec decay file, or from building a decay chain representation with `decaylanguage.DecayChain.to_dict`.
+
+        See also
+        --------
+        decaylanguage.DecFileParser.build_decay_chains for creating a decay chain dict from parsing a .dec file.
+        decaylanguage.DecFileParser: class for creating an input decay chain.
+        """
+        # Store the input decay chain
+        self._chain = decaychain
+
+        # Instantiate the digraph with defaults possibly overridden by user attributes
+        self._df = pandas.DataFrame()
+
+        # Build the actual graph from the input decay chain structure
+        self._build_decay_graph()
+
+    def _build_decay_graph(self):
+        """
+        Recursively navigate the decay chain tree and append to a pandas DataFrame.
+        """
+        def get_decay_str(prefix, mother, list_parts):
+            # print(mother)
+            if prefix is None:
+                decay_str = mother + ' --> ' + ' '.join(list_parts)
+            else:
+                decay_str = prefix + ' ∮ ' + mother + ' --> ' + ' '.join(list_parts)
+
+            return decay_str
+
+        def iterate_chain(
+            subchain, _eff_bf=1.0, _total_eff_bf=0.0, prefix = None, mother=None):
+            n_decaymodes = len(subchain)
+            for idm in range(n_decaymodes):
+                _list_parts = subchain[idm]["fs"]
+                if not has_subdecay(_list_parts):
+                    _bf = subchain[idm]["bf"]
+                    new_row = {'Decay': get_decay_str(prefix, mother, _list_parts),
+                                'BF': _eff_bf * _bf}
+                    self._df = self._df.append(new_row, ignore_index=True)
+                    _total_eff_bf += _eff_bf * _bf
+                else:
+                    _bf_1 = subchain[idm]["bf"]
+                    _iter_eff_bf = 1.0
+                    _c = 0
+                    max_l = len([_p for _p in _list_parts if not isinstance(_p, str)])
+                    daughters = [_p if isinstance(_p, str) else list(_p.keys())[0] for _p in _list_parts]
+                    for i, _p in enumerate(_list_parts):
+                        if not isinstance(_p, str):
+                            _k = list(_p.keys())[0]
+                            # print(get_decay_str(prefix, mother, daughters))
+                            if _c == max_l-1:
+                                _total_eff_bf = iterate_chain(
+                                    _p[_k],
+                                    _eff_bf=_iter_eff_bf * _eff_bf * _bf_1,
+                                    _total_eff_bf=_total_eff_bf,
+                                    mother=_k,
+                                    prefix=get_decay_str(prefix, mother, daughters)
+                                )
+                            else:
+                                _iter_eff_bf = iterate_chain(
+                                    _p[_k],
+                                    _eff_bf=_iter_eff_bf * _eff_bf,
+                                    _total_eff_bf=0,
+                                    mother=_k,
+                                    prefix=get_decay_str(prefix, mother, daughters)
+                                )
+                            _c += 1
+
+            return _total_eff_bf
+
+        def has_subdecay(ds):
+            return not all(isinstance(p, str) for p in ds)
+
+        k = list(self._chain.keys())[0]
+        sc = self._chain[k]
+
+        # Actually build the whole decay chain, iteratively
+        _total_eff_bf = iterate_chain(sc, mother=k)
+        print(f'Total BF tabulated: {_total_eff_bf*100:.2f}%')
+
+    @property
+    def table(self):
+        """
+        Get the actual `pandas.DataFrame` object.
+        The user now has full control ...
+        """
+        return self._df
