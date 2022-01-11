@@ -338,7 +338,7 @@ class DecayChainToTable:
             if prefix is None:
                 decay_str = mother + ' --> ' + ' '.join(list_parts)
             else:
-                decay_str = prefix + ' ∮ ' + mother + ' --> ' + ' '.join(list_parts)
+                decay_str = prefix + ' ; ' + mother + ' --> ' + ' '.join(list_parts)
 
             return decay_str
 
