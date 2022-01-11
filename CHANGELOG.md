@@ -2,7 +2,20 @@
 
 ## WIP
 
-* Dropped Python 2.7 / 3.5 support
+* Tests:
+  - Various hooks version updates.
+
+## Version 0.13.0 (2021-11-10)
+
+* Dependencies:
+  - Dropped Python 2 (2.7) support.
+  - Added support for Python 3.10 and dropped 3.5.
+  - Dependency on `lark-parser` upgraded to recent versions.
+* Tests:
+  - Dependency on Pytest upgraded.
+  - Added new pre-commit hooks and updated various versions of existing hooks.
+* Miscellaneous:
+  - Added Nox support.
 
 ## Version 0.12.0 (2021-09-02)
 
