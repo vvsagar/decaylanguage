@@ -343,15 +343,17 @@ class DecayChainToTable:
             return decay_str
 
         def iterate_chain(
-            subchain, _eff_bf=1.0, _total_eff_bf=0.0, prefix = None, mother=None):
+            subchain, _eff_bf=1.0, _total_eff_bf=0.0, prefix = None, mother=None, _append=True):
             n_decaymodes = len(subchain)
             for idm in range(n_decaymodes):
                 _list_parts = subchain[idm]["fs"]
                 if not has_subdecay(_list_parts):
                     _bf = subchain[idm]["bf"]
-                    new_row = {'Decay': get_decay_str(prefix, mother, _list_parts),
-                                'BF': _eff_bf * _bf}
-                    self._df = self._df.append(new_row, ignore_index=True)
+                    _decay_str = get_decay_str(prefix, mother, _list_parts)
+                    if _append:
+                        new_row = {'Decay': _decay_str,
+                                    'BF': _eff_bf * _bf}
+                        self._df = self._df.append(new_row, ignore_index=True)
                     _total_eff_bf += _eff_bf * _bf
                 else:
                     _bf_1 = subchain[idm]["bf"]
@@ -359,29 +361,30 @@ class DecayChainToTable:
                     _c = 0
                     max_l = len([_p for _p in _list_parts if not isinstance(_p, str)])
                     daughters = [_p if isinstance(_p, str) else list(_p.keys())[0] for _p in _list_parts]
+                    _decay_str = get_decay_str(prefix, mother, daughters)
                     for i, _p in enumerate(_list_parts):
                         if not isinstance(_p, str):
                             _k = list(_p.keys())[0]
-                            # print(get_decay_str(prefix, mother, daughters))
                             if _c == max_l-1:
-                                _total_eff_bf = iterate_chain(
+                                _total_eff_bf, _decay_str = iterate_chain(
                                     _p[_k],
                                     _eff_bf=_iter_eff_bf * _eff_bf * _bf_1,
                                     _total_eff_bf=_total_eff_bf,
                                     mother=_k,
-                                    prefix=get_decay_str(prefix, mother, daughters)
+                                    prefix= _decay_str
                                 )
                             else:
-                                _iter_eff_bf = iterate_chain(
+                                _iter_eff_bf, _decay_str = iterate_chain(
                                     _p[_k],
                                     _eff_bf=_iter_eff_bf * _eff_bf,
                                     _total_eff_bf=0,
                                     mother=_k,
-                                    prefix=get_decay_str(prefix, mother, daughters)
+                                    prefix=_decay_str,
+                                    _append=False
                                 )
                             _c += 1
 
-            return _total_eff_bf
+            return _total_eff_bf, _decay_str
 
         def has_subdecay(ds):
             return not all(isinstance(p, str) for p in ds)
@@ -390,7 +393,7 @@ class DecayChainToTable:
         sc = self._chain[k]
 
         # Actually build the whole decay chain, iteratively
-        _total_eff_bf = iterate_chain(sc, mother=k)
+        _total_eff_bf, _decay_str = iterate_chain(sc, mother=k)
         print(f'Total BF tabulated: {_total_eff_bf*100:.2f}%')
 
     @property
