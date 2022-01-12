@@ -195,7 +195,7 @@ class DecayChainViewer:
                                     link_pos=i,
                                     _eff_bf=_iter_eff_bf * _eff_bf,
                                     _total_eff_bf=0,
-                                     _show_eff=False
+                                    _show_eff=False
                                 )
                             _c += 1
 
