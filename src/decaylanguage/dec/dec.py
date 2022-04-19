@@ -1073,7 +1073,7 @@ All but the first occurrence will be discarded/removed ...""".format(
         keys = ("bf", "fs", "model", "model_params")
 
         info = []
-        for dm in mother_decs:
+        for dm in mother_decs.copy():
             # Require that the BF is above the threshold at each step
             if dm["bf"] > minimum_step_bf:
                 daughters = dm["fs"]
