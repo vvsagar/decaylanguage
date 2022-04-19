@@ -324,7 +324,7 @@ class DecayChainToTable:
         self._chain = decaychain
 
         # Instantiate the digraph with defaults possibly overridden by user attributes
-        self._df = pandas.DataFrame()
+        self._df = pandas.DataFrame(columns=['Decay', 'BF'])
 
         # Build the actual graph from the input decay chain structure
         self._build_decay_graph()
