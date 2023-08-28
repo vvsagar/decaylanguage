@@ -926,7 +926,7 @@ All but the first occurrence will be discarded/removed ...""".format(
                     # Optimization: Each further decay produces atleast 1 more particle,
                     # so require fewer daughters left than FSPs left
                     # And that there are no FSPs in the daughters left
-                    if (len(daughters_left) < len(fsp_left)) and all([x not in daughters_left for x in fsp]):
+                    if (len(daughters_left) <= len(fsp_left)) and all([x not in daughters_left for x in fsp]):
                         append = False
                         for i, fs in enumerate(daughters):
                             if fs in stable_particles:
@@ -987,7 +987,7 @@ All but the first occurrence will be discarded/removed ...""".format(
                             daughters_left.remove(i)
 
                     if all([x not in stable_particles for x in daughters_left])\
-                                        and (len(daughters_left) < len(fsp_left)):
+                                        and (len(daughters_left) <= len(fsp_left)):
                         append = False
                         if len(daughters_left) == 1:
                             try:
