@@ -894,7 +894,7 @@ All but the first occurrence will be discarded/removed ...""".format(
 
 
     def build_decay_chains_to_specific_fsp(
-        self, mother, stable_particles=(), fsp=[], minimum_step_bf=1e-5
+        self, mother, stable_particles=(), fsp=[], minimum_step_bf=1e-4
     ):
 
         # FSPs requested should be considered as stable particles too
