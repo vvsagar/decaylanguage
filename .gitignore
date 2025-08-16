@@ -71,3 +71,5 @@ docs/_build
 *.gv*
 
 /src/decaylanguage/_version.py
+
+*.root
