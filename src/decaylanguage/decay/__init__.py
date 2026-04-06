@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 from .decay import DaughtersDict, DecayChain, DecayMode
+from .table import DecayChainToTable
 from .viewer import DecayChainViewer
 
-__all__ = ("DaughtersDict", "DecayChain", "DecayChainViewer", "DecayMode")
+__all__ = ("DaughtersDict", "DecayChain", "DecayChainToTable", "DecayChainViewer", "DecayMode")
 
 
 def __dir__() -> tuple[str, ...]:
