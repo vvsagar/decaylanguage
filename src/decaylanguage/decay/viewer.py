@@ -15,7 +15,7 @@ import graphviz
 from particle import latex_to_html_name
 from particle.converters.bimap import DirectionalMaps
 
-import pandas
+import pandas as pd
 
 counter = iter(itertools.count())
 
@@ -324,7 +324,7 @@ class DecayChainToTable:
         self._chain = decaychain
 
         # Instantiate the digraph with defaults possibly overridden by user attributes
-        self._df = pandas.DataFrame(columns=['Decay', 'BF'])
+        self._df = pd.DataFrame(columns=['Decay', 'BF'])
 
         # Build the actual graph from the input decay chain structure
         self._build_decay_graph()
@@ -353,7 +353,7 @@ class DecayChainToTable:
                     if _append:
                         new_row = {'Decay': _decay_str,
                                     'BF': _eff_bf * _bf}
-                        self._df = self._df.append(new_row, ignore_index=True)
+                        self._df = pd.concat([self._df, pd.DataFrame([new_row])], ignore_index=True)
                     _total_eff_bf += _eff_bf * _bf
                 else:
                     _bf_1 = subchain[idm]["bf"]
