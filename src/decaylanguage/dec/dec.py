@@ -1486,6 +1486,8 @@ Continuing but be warned of possible side effects ..."""
             fractions from the mother down to the stable particles
             (the "effective branching fraction") is above this value will be
             returned. This prunes less likely or negligible decay paths.
+            The filtering does not reorder the modes: returned decay chains
+            keep the order in which they appear in the .dec file.
 
         Returns
         -------
@@ -1529,6 +1531,11 @@ Continuing but be warned of possible side effects ..."""
         # Standardize inputs for hashing
         stable_set = frozenset(stable_particles)
 
+        # Only a positive threshold permits early termination in descending BF
+        # order. For other thresholds, signed BFs can still be filtered, and
+        # a daughter whose decay modes are all filtered invalidates its parent.
+        sort_for_pruning = minimum_effective_bf is not None and minimum_effective_bf > 0
+
         # When no branching-fraction cut is requested, the decay subtree of a
         # given particle is independent of the path taken to reach it, so we can
         # key the cache on the particle name alone. This makes a particle that
@@ -1537,6 +1544,31 @@ Continuing but be warned of possible side effects ..."""
         # accumulated along the path, so that value must remain part of the key.
         cache_on_name_only = minimum_effective_bf is None
 
+        # Cache the modes of each mother in pruning order. The same mother is
+        # revisited under many effective-BF cache keys, so sorting it only once
+        # avoids repeated branching-fraction extraction and sorting.
+        ordered_modes: dict[str, tuple[tuple[int, Any], ...]] = {}
+
+        def _modes_in_pruning_order(p_name: str) -> tuple[tuple[int, Any], ...]:
+            try:
+                return ordered_modes[p_name]
+            except KeyError:
+                modes = self._find_decay_modes(p_name)
+                if not sort_for_pruning:
+                    ordered = tuple(enumerate(modes))
+                else:
+                    # Descending BF lets the loop below stop at the first mode
+                    # failing the cut, since all following ones fail too.
+                    ordered = tuple(
+                        sorted(
+                            enumerate(modes),
+                            key=lambda item: get_branching_fraction(item[1]),
+                            reverse=True,
+                        )
+                    )
+                ordered_modes[p_name] = ordered
+                return ordered
+
         # Define the actual computation logic within a helper function.
         # This function returns the raw, mutable result, which is cached.
         @cache
@@ -1544,15 +1576,17 @@ Continuing but be warned of possible side effects ..."""
             p_name: str,
             current_effective_bf: float = 1.0,
         ) -> dict[str, list[DecayModeDict]]:
-            info = []
+            info: list[tuple[int, DecayModeDict]] = []
 
-            for dm in self._find_decay_modes(p_name):
+            for index, dm in _modes_in_pruning_order(p_name):
                 # Fetch details
                 d = self._decay_mode_details(dm, display_photos_keyword=False)
 
                 if (minimum_effective_bf is not None) and (
                     d["bf"] * current_effective_bf < minimum_effective_bf
                 ):
+                    if sort_for_pruning:
+                        break
                     continue
 
                 for i, fs in enumerate(d["fs"]):
@@ -1567,16 +1601,24 @@ Continuing but be warned of possible side effects ..."""
                             fs,
                             current_effective_bf=current_effective_bf * d["bf"],
                         )
+                        if _info[fs] == []:
+                            if not _modes_in_pruning_order(fs):
+                                continue  # an empty decay table means stable
+                            if minimum_effective_bf is not None:
+                                break  # daughter had decays but all were filtered
                         d["fs"][i] = _info  # type: ignore[index]
-                        if (minimum_effective_bf is not None) and (_info[fs] == []):
-                            break  # daughter had decays but all filtered, so skip
                     # if fs does not have decays defined in the parsed file
                     except DecayNotFound:
                         pass
                 else:
-                    info.append(d)
+                    info.append((index, d))
 
-            return {p_name: info}
+            if sort_for_pruning:
+                # Sorting is an implementation detail: restore the source-file
+                # order so that the returned chain is unaffected by it.
+                info.sort(key=lambda item: item[0])
+
+            return {p_name: [d for _, d in info]}
 
         # This is the wrapper function that external callers (and recursive calls) will use.
         # It always returns a deepcopy of the (potentially cached) raw result,
@@ -1599,6 +1641,303 @@ Continuing but be warned of possible side effects ..."""
 
     def __str__(self) -> str:
         return repr(self)
+
+    def build_decay_chains_to_inclusive_fsp(self, mother, fsp, stable_particles=(),
+                                            multi=True,
+                                            only_direct_daughters=False):
+
+        if multi:
+            assert isinstance(fsp, list)
+        else:
+            assert isinstance(fsp, str)
+            fsp = [fsp]
+
+        keys = ("bf", "fs", "model", "model_params")
+
+        info = []
+        for dm in self._find_decay_modes(mother):
+            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
+            d = dict(zip(keys, list_dm_details, strict=False))
+
+            if any(f in d["fs"] for f in fsp):
+                info.append(d)
+
+            elif not only_direct_daughters:
+                append = False
+                for i, fs in enumerate(d["fs"]):
+                    if fs in stable_particles:
+                        continue
+
+                    try:
+                        # This throws a DecayNotFound exception
+                        # if fs does not have decays defined in the parsed file
+                        # _n_dms = len(self._find_decay_modes(fs))
+
+                        _info = self.build_decay_chains_to_inclusive_fsp(mother=fs,
+                                                                        fsp=fsp,
+                                                                        stable_particles=stable_particles)
+                        if len(_info[f"{fs}"]) > 0:
+                            d["fs"][i] = _info
+                            append=True
+                    except DecayNotFound:
+                        pass
+                if append:
+                    info.append(d)
+
+        return {mother: info}
+
+
+    def build_decay_chains_to_specific_fsp(
+        self, mother, stable_particles=(), fsp=None, minimum_step_bf=1e-4
+    ):
+
+        # FSPs requested should be considered as stable particles too
+        if fsp is None:
+            fsp = []
+        stable_particles = tuple(set(list(stable_particles) + fsp))
+
+        keys = ("bf", "fs", "model", "model_params")
+
+        info = []
+        for dm in self._find_decay_modes(mother):
+            fsp_left = fsp
+
+            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
+            d = dict(zip(keys, list_dm_details, strict=False))
+
+            # Require that the BF is above the threshold at each step
+            if d["bf"] > minimum_step_bf:
+                daughters = d["fs"]
+                fsp_left = sorted(fsp_left)
+                if sorted(daughters) == fsp_left:
+                    info.append(d)
+
+                else:
+                    daughters_left = daughters.copy()
+                    for i in fsp_left:
+                        if i in daughters_left:
+                            fsp_left.remove(i)
+                            daughters_left.remove(i)
+
+                    # Optimization: Each further decay produces atleast 1 more particle,
+                    # so require fewer daughters left than FSPs left
+                    # And that there are no FSPs in the daughters left
+                    if (len(daughters_left) <= len(fsp_left)) and all(x not in daughters_left for x in fsp):
+                        append = False
+                        for i, fs in enumerate(daughters):
+                            if fs in stable_particles:
+                                continue
+
+                            try:
+                                # This throws a DecayNotFound exception
+                                # if fs does not have decays defined in the parsed file
+                                # _n_dms = len(self._find_decay_modes(fs))
+
+                                _info = self.build_decay_chains_to_specific_fsp(
+                                    fs, stable_particles, fsp_left
+                                )
+                                # Check if we got a non empty chain
+                                if len(_info[f"{fs}"]) > 0:
+                                    # Save only if the spectator particles belong
+                                    if (all([x in fsp for x in d["fs"][i + 1 :]])) and (
+                                        all([x in fsp for x in d["fs"][:i]])
+                                        ):
+                                        d["fs"][i] = _info
+                                        append = True
+                            except DecayNotFound:
+                                pass
+
+                        if append:
+                            info.append(d)
+
+        return {mother: info}
+
+
+    def build_decay_chains_to_specific_fsp_new(
+        self, mother, stable_particles=(), fsp=None, other_daughters = None, minimum_step_bf=1e-4
+    ):
+
+        # FSPs requested should be considered as stable particles too
+        if other_daughters is None:
+            other_daughters = []
+        if fsp is None:
+            fsp = []
+        stable_particles = tuple(set(list(stable_particles) + fsp))
+
+        keys = ("bf", "fs", "model", "model_params")
+
+        info = []
+        for dm in self._find_decay_modes(mother):
+
+            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
+            d = dict(zip(keys, list_dm_details, strict=False))
+
+            # Require that the BF is above the threshold at each step
+            if d["bf"] > minimum_step_bf:
+                daughters = d["fs"]
+                if sorted(daughters+other_daughters) == sorted(fsp):
+                    info.append(d)
+
+                else:
+                    fsp_left = fsp.copy()
+                    daughters_left = daughters.copy()
+                    for i in fsp:
+                        if i in daughters_left:
+                            fsp_left.remove(i)
+                            daughters_left.remove(i)
+
+                    if all(x not in stable_particles for x in daughters_left)\
+                                        and (len(daughters_left) <= len(fsp_left)):
+                        append = False
+                        if len(daughters_left) == 1:
+                            try:
+                                _info = self.build_decay_chains_to_specific_fsp_new(
+                                    mother=daughters_left[0],
+                                    stable_particles=stable_particles,
+                                    fsp=fsp_left,
+                                )
+
+                                if len(_info[f"{daughters_left[0]}"]) > 0:
+                                    d["fs"][daughters.index(daughters_left[0])] = _info
+                                    append = True
+                            except DecayNotFound:
+                                pass
+
+                        elif len(daughters_left) == 2:
+                            # print(f'Entered {daughters_left}')
+                            try:
+                                _info1 = self.build_decay_chains(
+                                    mother=daughters_left[0],
+                                    stable_particles=stable_particles)
+                                for i in _info1[daughters_left[0]]:
+                                    if all(type(x) is not dict for x in i['fs']):
+                                        if containedInFirst(fsp_left, i['fs']):
+                                            fsp_left_left = fsp_left.copy()
+                                            for f in i['fs']:
+                                                fsp_left_left.remove(f)
+
+                                            _info = self.build_decay_chains_to_specific_fsp_new(
+                                                            mother=daughters_left[1],
+                                                            stable_particles=stable_particles,
+                                                            fsp=fsp_left_left)
+
+                                            if len(_info[f"{daughters_left[1]}"]) > 0:
+                                                d["fs"][daughters.index(daughters_left[0])] = {daughters_left[0]: [i]}
+                                                d["fs"][daughters.index(daughters_left[1])] = _info
+                                                append = True
+                                    # else:
+                                    #     print(f'{daughters_left[0]} decays are messy')
+
+                            except DecayNotFound:
+                                pass
+
+                        # else:
+                            # print(f'Skipping {daughters_left} looking for {fsp_left}')
+
+
+                        # append = False
+                        # other_daughters = daughters_left.copy()
+                        # for i, fs in enumerate(daughters_left):
+                        #     try:
+                        #         other_daughters.remove(fs)
+
+                        #         _info = self.build_decay_chains_to_specific_fsp_new(
+                        #             mother=fs,
+                        #             stable_particles=stable_particles,
+                        #             fsp=fsp_left,
+                        #             other_daughters=other_daughters,
+                        #         )
+
+                        #         if all([x in fsp_left for x in _info['fs']]):
+                        #             if sorted(other_daughters+_info[fs]['fs']) == sorted(fsp_left):
+                        #                     d["fs"][i] = _info
+                        #                     append = True
+                        #             else:
+                        #                 other_daughters += _info['fs']
+
+                        #     except DecayNotFound:
+                        #         pass
+
+                        if append:
+                            info.append(d)
+
+        return {mother: info}
+
+    def build_decay_chains_to_specific_fsp_pythia(
+        self, mother_decs, stable_particles=(), fsp=None, other_daughters = None, minimum_step_bf=1e-4
+    ):
+
+        # FSPs requested should be considered as stable particles too
+        if other_daughters is None:
+            other_daughters = []
+        if fsp is None:
+            fsp = []
+        stable_particles = tuple(set(list(stable_particles) + fsp))
+
+
+        info = []
+        for dm in mother_decs.copy():
+            # Require that the BF is above the threshold at each step
+            if dm["bf"] > minimum_step_bf:
+                daughters = dm["fs"]
+                if sorted(daughters+other_daughters) == sorted(fsp):
+                    info.append(dm)
+
+                else:
+                    fsp_left = fsp.copy()
+                    daughters_left = daughters.copy()
+                    for i in fsp:
+                        if i in daughters_left:
+                            fsp_left.remove(i)
+                            daughters_left.remove(i)
+
+                    if all(x not in stable_particles for x in daughters_left)\
+                                        and (len(daughters_left) < len(fsp_left)):
+                        append = False
+                        if len(daughters_left) == 1:
+                            try:
+                                _info = self.build_decay_chains_to_specific_fsp_new(
+                                    mother=daughters_left[0],
+                                    stable_particles=stable_particles,
+                                    fsp=fsp_left,
+                                )
+
+                                if len(_info[f"{daughters_left[0]}"]) > 0:
+                                    dm["fs"][daughters.index(daughters_left[0])] = _info
+                                    append = True
+                            except DecayNotFound:
+                                pass
+
+                        elif len(daughters_left) == 2:
+                            try:
+                                _info1 = self.build_decay_chains(
+                                    mother=daughters_left[0],
+                                    stable_particles=stable_particles)
+                                for i in _info1[daughters_left[0]]:
+                                    if all(type(x) is not dict for x in i['fs']):
+                                        if containedInFirst(fsp_left, i['fs']):
+                                            fsp_left_left = fsp_left.copy()
+                                            for f in i['fs']:
+                                                fsp_left_left.remove(f)
+
+                                            _info = self.build_decay_chains_to_specific_fsp_new(
+                                                            mother=daughters_left[1],
+                                                            stable_particles=stable_particles,
+                                                            fsp=fsp_left_left)
+
+                                            if len(_info[f"{daughters_left[1]}"]) > 0:
+                                                dm["fs"][daughters.index(daughters_left[0])] = {daughters_left[0]: [i]}
+                                                dm["fs"][daughters.index(daughters_left[1])] = _info
+                                                append = True
+
+                            except DecayNotFound:
+                                pass
+
+                        if append:
+                            info.append(dm)
+
+        return {'B+': info}
+
 
 
 class DecayModelAliasReplacement(Transformer):  # type: ignore[misc]
