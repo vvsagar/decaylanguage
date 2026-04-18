@@ -1129,48 +1129,76 @@ All but the first occurrence will be discarded/removed ...""".format(
 
         return _recurse(mother)
 
-    def __repr__(self) -> str:
-        if self._parsed_dec_file is not None:
-            return f"<{self.__class__.__name__}: decfile(s)={self._dec_file_names}, n_decays={self.number_of_decays}>"
-        return f"<{self.__class__.__name__}: decfile(s)={self._dec_file_names}>"
+    def build_decay_chains_to_inclusive_fsp(
+        self,
+        mother: str,
+        fsp: str | list[str],
+        stable_particles: Iterable[str] = (),
+        multi: bool = True,
+        only_direct_daughters: bool = False,
+    ) -> dict[str, list[DecayModeDict]]:
+        """
+        Build decay chains leading to a set of inclusive final-state particles.
 
-    def __str__(self) -> str:
-        return repr(self)
+        This method finds all decay chains from the given mother particle that contain
+        any of the specified final-state particles (FSPs) somewhere in the decay chain.
 
-    def build_decay_chains_to_inclusive_fsp(self, mother, fsp, stable_particles=(),
-                                            multi=True,
-                                            only_direct_daughters=False):
+        Parameters
+        ----------
+        mother : str
+            The mother particle name.
+        fsp : str or list[str]
+            The final-state particle(s) to search for. If ``multi=False``, a single
+            string is accepted and converted to a list internally.
+        stable_particles : iterable, optional
+            Particles to consider as stable (stop the decay chain there).
+        multi : bool, optional, default=True
+            If False, treat ``fsp`` as a single string rather than a list.
+        only_direct_daughters : bool, optional, default=False
+            If True, only consider direct daughter particles (no recursive search).
 
-        if multi:
-            assert isinstance(fsp, list)
+        Returns
+        -------
+        dict
+            A dictionary mapping the mother particle name to a list of
+            matching decay modes with their branching fractions, final states,
+            and model information.
+        """
+        if not stable_particles:
+            stable_particles_tuple: tuple[str, ...] = ()
         else:
-            assert isinstance(fsp, str)
-            fsp = [fsp]
+            stable_particles_tuple = tuple(stable_particles)
 
-        info = []
+        assert isinstance(fsp, list) if multi else isinstance(fsp, str)
+        fsp_list = [fsp] if isinstance(fsp, str) else list(fsp)
+
+        info: list[DecayModeDict] = []
         for dm in self._find_decay_modes(mother):
             d = self._decay_mode_details(dm, display_photos_keyword=False)
 
-            if any(f in d["fs"] for f in fsp):
+            if any(f in d["fs"] for f in fsp_list):
                 info.append(d)
 
             elif not only_direct_daughters:
                 append = False
                 for i, fs in enumerate(d["fs"]):
-                    if fs in stable_particles:
+                    if fs in stable_particles_tuple:
                         continue
 
                     try:
-                        # This throws a DecayNotFound exception
-                        # if fs does not have decays defined in the parsed file
-                        # _n_dms = len(self._find_decay_modes(fs))
+                        assert isinstance(fs, str)
 
-                        _info = self.build_decay_chains_to_inclusive_fsp(mother=fs,
-                                                                        fsp=fsp,
-                                                                        stable_particles=stable_particles)
-                        if len(_info[f"{fs}"]) > 0:
-                            d["fs"][i] = _info # type: ignore[index]
-                            append=True
+                        _info = self.build_decay_chains_to_inclusive_fsp(
+                            mother=fs,
+                            fsp=fsp_list,
+                            stable_particles=stable_particles_tuple,
+                            multi=True,
+                            only_direct_daughters=False,
+                        )
+                        if len(_info[fs]) > 0:
+                            d["fs"][i] = _info  # type: ignore[index]
+                            append = True
+                    # if fs does not have decays defined in the parsed file
                     except DecayNotFound:
                         pass
                 if append:
@@ -1178,6 +1206,13 @@ All but the first occurrence will be discarded/removed ...""".format(
 
         return {mother: info}
 
+    def __repr__(self) -> str:
+        if self._parsed_dec_file is not None:
+            return f"<{self.__class__.__name__}: decfile(s)={self._dec_file_names}, n_decays={self.number_of_decays}>"
+        return f"<{self.__class__.__name__}: decfile(s)={self._dec_file_names}>"
+
+    def __str__(self) -> str:
+        return repr(self)
 
     def build_decay_chains_to_specific_fsp(
         self, mother, stable_particles=(), fsp=None, minimum_step_bf=1e-4
@@ -1187,7 +1222,6 @@ All but the first occurrence will be discarded/removed ...""".format(
         if fsp is None:
             fsp = []
         stable_particles = tuple(set(list(stable_particles) + fsp))
-
 
         info = []
         for dm in self._find_decay_modes(mother):
