@@ -1147,12 +1147,9 @@ All but the first occurrence will be discarded/removed ...""".format(
             assert isinstance(fsp, str)
             fsp = [fsp]
 
-        keys = ("bf", "fs", "model", "model_params")
-
         info = []
         for dm in self._find_decay_modes(mother):
-            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
-            d = dict(zip(keys, list_dm_details, strict=False))
+            d = self._decay_mode_details(dm, display_photos_keyword=False)
 
             if any(f in d["fs"] for f in fsp):
                 info.append(d)
@@ -1172,7 +1169,7 @@ All but the first occurrence will be discarded/removed ...""".format(
                                                                         fsp=fsp,
                                                                         stable_particles=stable_particles)
                         if len(_info[f"{fs}"]) > 0:
-                            d["fs"][i] = _info
+                            d["fs"][i] = _info # type: ignore[index]
                             append=True
                     except DecayNotFound:
                         pass
@@ -1191,14 +1188,12 @@ All but the first occurrence will be discarded/removed ...""".format(
             fsp = []
         stable_particles = tuple(set(list(stable_particles) + fsp))
 
-        keys = ("bf", "fs", "model", "model_params")
 
         info = []
         for dm in self._find_decay_modes(mother):
             fsp_left = fsp
 
-            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
-            d = dict(zip(keys, list_dm_details, strict=False))
+            d =  self._decay_mode_details(dm, display_photos_keyword=False)
 
             # Require that the BF is above the threshold at each step
             if d["bf"] > minimum_step_bf:
@@ -1234,8 +1229,8 @@ All but the first occurrence will be discarded/removed ...""".format(
                                 # Check if we got a non empty chain
                                 if len(_info[f"{fs}"]) > 0:
                                     # Save only if the spectator particles belong
-                                    if (all([x in fsp for x in d["fs"][i + 1 :]])) and (
-                                        all([x in fsp for x in d["fs"][:i]])
+                                    if (all(x in fsp for x in d["fs"][i + 1 :])) and (
+                                        all(x in fsp for x in d["fs"][:i])
                                         ):
                                         d["fs"][i] = _info
                                         append = True
@@ -1259,13 +1254,11 @@ All but the first occurrence will be discarded/removed ...""".format(
             fsp = []
         stable_particles = tuple(set(list(stable_particles) + fsp))
 
-        keys = ("bf", "fs", "model", "model_params")
 
         info = []
         for dm in self._find_decay_modes(mother):
 
-            list_dm_details = self._decay_mode_details(dm, display_photos_keyword=False)
-            d = dict(zip(keys, list_dm_details, strict=False))
+            d = self._decay_mode_details(dm, display_photos_keyword=False)
 
             # Require that the BF is above the threshold at each step
             if d["bf"] > minimum_step_bf:
