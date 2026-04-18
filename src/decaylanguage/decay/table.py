@@ -55,7 +55,7 @@ class DecayChainToTable:
         self._chain = decaychain
 
         # Instantiate the digraph with defaults possibly overridden by user attributes
-        self._df = pd.DataFrame(columns=['Decay', 'BF'])
+        self._df = pd.DataFrame(columns=["Decay", "BF"])
 
         # Build the actual graph from the input decay chain structure
         self._build_decay_graph()
@@ -64,17 +64,24 @@ class DecayChainToTable:
         """
         Recursively navigate the decay chain tree and append to a pandas DataFrame.
         """
+
         def get_decay_str(prefix, mother, list_parts):
             # print(mother)
             if prefix is None:
-                decay_str = mother + ' --> ' + ' '.join(list_parts)
+                decay_str = mother + " --> " + " ".join(list_parts)
             else:
-                decay_str = prefix + ' ; ' + mother + ' --> ' + ' '.join(list_parts)
+                decay_str = prefix + " ; " + mother + " --> " + " ".join(list_parts)
 
             return decay_str
 
         def iterate_chain(
-            subchain, _eff_bf=1.0, _total_eff_bf=0.0, prefix = None, mother=None, _append=True):
+            subchain,
+            _eff_bf=1.0,
+            _total_eff_bf=0.0,
+            prefix=None,
+            mother=None,
+            _append=True,
+        ):
             n_decaymodes = len(subchain)
             for idm in range(n_decaymodes):
                 _list_parts = subchain[idm]["fs"]
@@ -82,36 +89,40 @@ class DecayChainToTable:
                     _bf = subchain[idm]["bf"]
                     _decay_str = get_decay_str(prefix, mother, _list_parts)
                     if _append:
-                        new_row = {'Decay': _decay_str,
-                                    'BF': _eff_bf * _bf}
-                        self._df = pd.concat([self._df, pd.DataFrame([new_row])], ignore_index=True)
+                        new_row = {"Decay": _decay_str, "BF": _eff_bf * _bf}
+                        self._df = pd.concat(
+                            [self._df, pd.DataFrame([new_row])], ignore_index=True
+                        )
                     _total_eff_bf += _eff_bf * _bf
                 else:
                     _bf_1 = subchain[idm]["bf"]
                     _iter_eff_bf = 1.0
                     _c = 0
                     max_l = len([_p for _p in _list_parts if not isinstance(_p, str)])
-                    daughters = [_p if isinstance(_p, str) else next(iter(_p.keys())) for _p in _list_parts]
+                    daughters = [
+                        _p if isinstance(_p, str) else next(iter(_p.keys()))
+                        for _p in _list_parts
+                    ]
                     _decay_str = get_decay_str(prefix, mother, daughters)
                     for _i, _p in enumerate(_list_parts):
                         if not isinstance(_p, str):
                             _k = next(iter(_p.keys()))
-                            if _c == max_l-1:
+                            if _c == max_l - 1:
                                 _total_eff_bf, _decay_str = iterate_chain(
                                     _p[_k],
                                     _eff_bf=_iter_eff_bf * _eff_bf * _bf_1,
                                     _total_eff_bf=_total_eff_bf,
                                     mother=_k,
-                                    prefix= _decay_str
+                                    prefix=_decay_str,
                                 )
                             else:
                                 _iter_eff_bf, _decay_str = iterate_chain(
                                     _p[_k],
-                                    _eff_bf=_iter_eff_bf * _eff_bf,
+                                    _eff_bf=_iter_eff_bf * _eff_bf * _bf_1,
                                     _total_eff_bf=0,
                                     mother=_k,
                                     prefix=_decay_str,
-                                    _append=False
+                                    _append=False,
                                 )
                             _c += 1
 
