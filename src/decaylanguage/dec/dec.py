@@ -59,7 +59,7 @@ from particle.converters import PDG2EvtGenNameMap
 from particle.exceptions import MatchingIDNotFound
 
 from .. import data
-from ..decay.decay import DecayModeDict, _expand_decay_modes
+from ..decay.decay import DecayChainDict, DecayModeDict, _expand_decay_modes
 from ..utils import charge_conjugate_name, evtgen_name_is_particle
 from .enums import PhotosEnum, known_decay_models
 
@@ -1271,6 +1271,23 @@ Continuing but be warned of possible side effects ..."""
                 f"Decays of particle '{mother}' not found in .dec file!"
             ) from None
 
+    @staticmethod
+    def _normalize_particle_names(
+        value: str | Iterable[str], name: str
+    ) -> tuple[str, ...]:
+        # A single string names one particle; otherwise expect an iterable of
+        # particle names. Normalize to a tuple either way.
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, Iterable):
+            result = tuple(value)
+            if all(isinstance(item, str) for item in result):
+                return result
+        raise TypeError(
+            f"{name} must be a particle name or an iterable of particle "
+            f"names, got {value!r}"
+        )
+
     def list_decay_modes(
         self, mother: str, is_pdg_name: bool = False
     ) -> list[list[str]]:
@@ -1498,7 +1515,7 @@ Continuing but be warned of possible side effects ..."""
     def build_decay_chains(
         self,
         mother: str,
-        stable_particles: list[str] | set[str] | tuple[str] | tuple[()] = (),
+        stable_particles: str | Iterable[str] = (),
         minimum_effective_bf: float | None = None,
     ) -> dict[str, list[DecayModeDict]]:
         """
@@ -1518,8 +1535,10 @@ Continuing but be warned of possible side effects ..."""
         minimum_effective_bf: float | None, optional, default=None
             If provided, only decay chains where the product of branching
             fractions from the mother down to the stable particles
-            (the "effective branching fraction") is above this value will be
-            returned. This prunes less likely or negligible decay paths.
+            (the "effective branching fraction") is at least this value will
+            be returned. This prunes less likely or negligible decay paths.
+            The filtering does not reorder the modes: returned decay chains
+            keep the order in which they appear in the .dec file.
 
         Returns
         -------
@@ -1561,7 +1580,9 @@ Continuing but be warned of possible side effects ..."""
         {'D+': [{'bf': 1.0, 'fs': ['K-', 'pi+', 'pi+', 'pi0'], 'model': 'PHSP', 'model_params': ''}]}
         """
         # Standardize inputs for hashing
-        stable_set = frozenset(stable_particles)
+        stable_set = frozenset(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        )
 
         # When no branching-fraction cut is requested, the decay subtree of a
         # given particle is independent of the path taken to reach it, so we can
@@ -1578,17 +1599,17 @@ Continuing but be warned of possible side effects ..."""
             p_name: str,
             current_effective_bf: float = 1.0,
         ) -> dict[str, list[DecayModeDict]]:
-            info = []
+            info: list[DecayModeDict] = []
 
             for dm in self._find_decay_modes(p_name):
-                # Fetch details
-                d = self._decay_mode_details(dm, display_photos_keyword=False)
-
-                if (minimum_effective_bf is not None) and (
-                    d["bf"] * current_effective_bf < minimum_effective_bf
+                # Check the cut before extracting final states and model details.
+                if minimum_effective_bf is not None and (
+                    get_branching_fraction(dm) * current_effective_bf
+                    < minimum_effective_bf
                 ):
                     continue
 
+                d = self._decay_mode_details(dm, display_photos_keyword=False)
                 for i, fs in enumerate(d["fs"]):
                     if fs in stable_set:
                         continue
@@ -1601,9 +1622,11 @@ Continuing but be warned of possible side effects ..."""
                             fs,
                             current_effective_bf=current_effective_bf * d["bf"],
                         )
+                        if not _info[fs]:
+                            if self._find_decay_modes(fs):
+                                break  # daughter had decays but all were filtered
+                            continue  # an empty decay table means stable
                         d["fs"][i] = _info  # type: ignore[index]
-                        if (minimum_effective_bf is not None) and (_info[fs] == []):
-                            break  # daughter had decays but all filtered, so skip
                     # if fs does not have decays defined in the parsed file
                     except DecayNotFound:
                         pass
@@ -1625,6 +1648,448 @@ Continuing but be warned of possible side effects ..."""
             return copy.deepcopy(raw_result)
 
         return _recurse(mother)
+
+    def build_decay_chains_to_inclusive_fsp(
+        self,
+        mother: str,
+        fsp: str | Iterable[str],
+        stable_particles: str | Iterable[str] = (),
+        minimum_step_bf: float | None = None,
+    ) -> dict[str, list[DecayModeDict]]:
+        """
+        Build decay chains leading to a set of inclusive final-state particles.
+
+        This method finds all decay chains from the given mother particle that contain
+        *all* of the specified final-state particles (FSPs) somewhere in the decay
+        chain, at any level: they may be direct daughters, intermediate particles,
+        or appear in different daughter branches. Multiplicities matter: a particle
+        listed twice must occur at least twice in the chain. Other particles may
+        also be present; unlike :meth:`build_decay_chains_to_specific_fsp`, the
+        chain's final state need not consist of exactly the requested FSPs. As
+        soon as all FSPs (with their multiplicities) are found as direct daughters,
+        the search stops there for that mode: the matching mode is returned with
+        its (unexpanded) daughters.
+
+        Parameters
+        ----------
+        mother : str
+            The mother particle name.
+        fsp : str or iterable of str
+            The final-state particle(s) to search for. A single string is treated
+            as one particle; any other iterable is taken as the particles to
+            search for, with multiplicities mattering (see above).
+        stable_particles : str or iterable of str, optional
+            Particles to consider as stable (stop the decay chain there). A single
+            string is treated as one particle.
+        minimum_step_bf : float or None, optional, default=None
+            Minimum branching fraction required at every decay step. Modes with
+            a branching fraction less than or equal to this value are dropped
+            and not descended into. If ``None``, no per-step BF cut is applied.
+            Returned modes keep the order in which they appear in the .dec file.
+
+        Returns
+        -------
+        dict
+            A dictionary mapping the mother particle name to a list of
+            matching decay modes with their branching fractions, final states,
+            and model information.
+
+        Raises
+        ------
+        DecayNotFound
+            If no decays are defined for ``mother`` in the parsed file.
+        TypeError
+            If ``fsp`` or ``stable_particles`` is neither a string nor an
+            iterable of strings.
+        ValueError
+            If the decay chain contains a cycle.
+        """
+
+        fsp_tuple = self._normalize_particle_names(fsp, "fsp")
+        # Distinct targets in order of first appearance, and how many
+        # occurrences of each are required.
+        targets = tuple(dict.fromkeys(fsp_tuple))
+        target_index = {name: i for i, name in enumerate(targets)}
+        needed_counts = tuple(fsp_tuple.count(name) for name in targets)
+        stable_set = frozenset(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        )
+
+        # Particle names currently being expanded, in recursion order. A
+        # daughter already on this stack means the .dec file contains a
+        # cycle, which would otherwise recurse forever. Completed (cached)
+        # subtrees are no longer on the stack, so shared daughters are fine.
+        in_progress: list[str] = []
+
+        def _add_counts(
+            counts: tuple[int, ...], extra: tuple[int, ...]
+        ) -> tuple[int, ...]:
+            # Component-wise sum, capped at the requested multiplicities:
+            # occurrences beyond the requested ones are allowed, so counts
+            # only need to distinguish "found k of the required n".
+            return tuple(
+                min(needed, found + more)
+                for needed, found, more in zip(
+                    needed_counts, counts, extra, strict=True
+                )
+            )
+
+        empty_counts = tuple(0 for _ in targets)
+
+        if not targets:
+            # No particle is requested, so no chain is selected (and a direct
+            # "all of nothing" match must not return every mode).
+            self._find_decay_modes(mother)  # trigger the usual DecayNotFound
+            return {mother: []}
+
+        # For each particle, compute -- for every count vector over the target
+        # FSPs -- the decay modes of that particle whose chain contains at
+        # least that many occurrences of each target somewhere (direct
+        # daughters, intermediates, or deeper). The count vectors are the
+        # state of a small DP over the daughters of each mode: combining a
+        # mode's daughters adds their count vectors (capped), so targets
+        # split across different branches or levels are handled, and
+        # particles beyond the requested ones are allowed. Only non-zero
+        # count vectors are kept, since a daughter is only expanded when its
+        # sub-chain actually contains a requested particle.
+        #
+        # Results depend only on the particle name. Share cached subtrees
+        # during the search and copy them only when building the public result.
+        @cache
+        def _cached_recurse_raw(
+            p_name: str,
+        ) -> dict[tuple[int, ...], list[DecayModeDict]]:
+            in_progress.append(p_name)
+            try:
+                combined: dict[tuple[int, ...], list[DecayModeDict]] = {}
+                for dm in self._find_decay_modes(p_name):
+                    if (
+                        minimum_step_bf is not None
+                        and get_branching_fraction(dm) <= minimum_step_bf
+                    ):
+                        continue
+
+                    # Only extract model details once a mode contributes a match.
+                    daughters = get_final_state_particle_names(dm)
+                    # All the FSPs (with multiplicities) are already direct
+                    # daughters: stop there and return the mode unexpanded.
+                    direct_counts = empty_counts
+                    for daughter in daughters:
+                        if daughter in target_index:
+                            counts = list(direct_counts)
+                            counts[target_index[daughter]] += 1
+                            direct_counts = tuple(counts)
+                    if all(
+                        found >= needed
+                        for found, needed in zip(
+                            direct_counts, needed_counts, strict=True
+                        )
+                    ):
+                        d = self._decay_mode_details(dm, display_photos_keyword=False)
+                        combined.setdefault(needed_counts, []).append(d)
+                        continue
+
+                    # All ways to choose, per daughter, how it contributes to the
+                    # count vector found so far. A daughter is expanded whenever
+                    # one of its sub-chains contains a requested particle; all
+                    # its sub-modes with a given count vector are grouped
+                    # together, so picking any of them contributes at least
+                    # that count vector.
+                    combos: dict[tuple[int, ...], list[list[str | DecayChainDict]]] = {
+                        empty_counts: [[]]
+                    }
+                    for daughter in daughters:
+                        daughter_counts = list(empty_counts)
+                        if daughter in target_index:
+                            daughter_counts[target_index[daughter]] = 1
+                        daughter_counts_tuple = tuple(daughter_counts)
+                        expanded: dict[tuple[int, ...], DecayChainDict] = {}
+                        if daughter not in stable_set:
+                            if daughter in in_progress:
+                                cycle = " -> ".join([*in_progress, daughter])
+                                raise ValueError(
+                                    f"Cycle detected in decay chain: {cycle}"
+                                )
+                            try:
+                                sub_chains = _cached_recurse_raw(daughter)
+                            # if daughter has no decays defined in the file
+                            except DecayNotFound:
+                                sub_chains = {}
+                            for sub_counts, sub_modes in sub_chains.items():
+                                expanded[sub_counts] = {daughter: sub_modes}
+                        new_combos: dict[
+                            tuple[int, ...], list[list[str | DecayChainDict]]
+                        ] = {}
+                        for counts, choices_list in combos.items():
+                            if expanded:
+                                for sub_counts, sub_chain in expanded.items():
+                                    new_combos.setdefault(
+                                        _add_counts(
+                                            _add_counts(counts, daughter_counts_tuple),
+                                            sub_counts,
+                                        ),
+                                        [],
+                                    ).extend(
+                                        [*choices, sub_chain]
+                                        for choices in choices_list
+                                    )
+                            else:
+                                # Leave the daughter unexpanded.
+                                new_combos.setdefault(
+                                    _add_counts(counts, daughter_counts_tuple), []
+                                ).extend(
+                                    [*choices, daughter] for choices in choices_list
+                                )
+                        combos = new_combos
+                        if not combos:
+                            break
+
+                    combos.pop(empty_counts, None)
+                    if not combos:
+                        continue
+                    d = self._decay_mode_details(dm, display_photos_keyword=False)
+                    for counts, choices_list in combos.items():
+                        for choices in choices_list:
+                            combined.setdefault(counts, []).append(
+                                DecayModeDict(
+                                    bf=d["bf"],
+                                    fs=choices,
+                                    model=d["model"],
+                                    model_params=d["model_params"],
+                                )
+                            )
+            finally:
+                in_progress.pop()
+            return combined
+
+        def _materialize(modes: Iterable[DecayModeDict]) -> list[DecayModeDict]:
+            # Copy each occurrence independently, even when it shares a cached
+            # subtree with another daughter. The returned tree is mutable.
+            result = []
+            for mode in modes:
+                fs = [
+                    daughter
+                    if isinstance(daughter, str)
+                    else {
+                        name: _materialize(sub_modes)
+                        for name, sub_modes in daughter.items()
+                    }
+                    for daughter in mode["fs"]
+                ]
+                params = mode["model_params"]
+                if not isinstance(params, str):
+                    params = list(params)
+                result.append(
+                    DecayModeDict(
+                        bf=mode["bf"],
+                        fs=fs,
+                        model=mode["model"],
+                        model_params=params,
+                    )
+                )
+            return result
+
+        modes = _cached_recurse_raw(mother).get(needed_counts, [])
+        _cached_recurse_raw.cache_clear()
+        return {mother: _materialize(modes)}
+
+    def build_decay_chains_to_specific_fsp(
+        self,
+        mother: str,
+        fsp: str | Iterable[str],
+        stable_particles: str | Iterable[str] = (),
+        minimum_step_bf: float | None = None,
+    ) -> dict[str, list[DecayModeDict]]:
+        """
+        Build decay chains whose stable final state is exactly ``fsp``.
+
+        Unlike :meth:`build_decay_chains_to_inclusive_fsp`, this method requires
+        the requested particles to account for the complete final state.
+        Daughter particles may contribute any part of the requested multiset,
+        and the remaining FSPs are searched for in the other daughters. This
+        makes the search correct for genuinely multi-body matches, for example
+        ``B -> D* D*`` where each ``D*`` supplies part of the final state.
+
+        Parameters
+        ----------
+        mother : str
+            Input mother particle name.
+        fsp : str or iterable of str
+            Final-state particles to search for. A single string is treated as
+            one particle. Multiplicities matter.
+        stable_particles : str or iterable of str, optional
+            Additional particles to treat as stable. They must appear in
+            ``fsp`` to be part of a valid chain. A single string is treated
+            as one particle.
+        minimum_step_bf : float or None, optional, default=None
+            Modes with a branching fraction less than or equal to this value
+            are skipped. If ``None``, no per-step BF cut is applied.
+            Returned modes keep their order in the .dec file.
+
+        Returns
+        -------
+        dict
+            ``{mother: [decay mode dicts]}`` in the same format as
+            :meth:`build_decay_chains`.
+        """
+        needed_key = tuple(sorted(self._normalize_particle_names(fsp, "fsp")))
+        targets = set(needed_key)
+
+        # FSPs are final-state particles.
+        stable_set = targets | set(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        )
+
+        def _is_submultiset(sub: tuple[str, ...], items: tuple[str, ...]) -> bool:
+            """Whether ``sub`` is a sub-multiset of ``items``; both are sorted."""
+            i = 0
+            for item in items:
+                if i == len(sub):
+                    break
+                if sub[i] == item:
+                    i += 1
+                elif sub[i] < item:
+                    return False
+            return i == len(sub)
+
+        def _remove_submultiset(
+            items: tuple[str, ...], sub: tuple[str, ...]
+        ) -> tuple[str, ...]:
+            """Remove one occurrence of each entry of ``sub`` from ``items``."""
+            result: list[str] = []
+            i = 0
+            for item in items:
+                if i < len(sub) and sub[i] == item:
+                    i += 1
+                else:
+                    result.append(item)
+            return tuple(result)
+
+        @cache
+        def _final_states(p_name: str) -> tuple[tuple[str, ...], ...]:
+            """Return reachable final-state multisets that fit the requested FSPs."""
+            if p_name in stable_set:
+                return ((p_name,),) if p_name in targets else ()
+
+            try:
+                modes = self._find_decay_modes(p_name)
+            except DecayNotFound:
+                # An implicitly stable particle not in the requested FSPs cannot match.
+                return ()
+
+            states: set[tuple[str, ...]] = set()
+
+            for dm in modes:
+                if (
+                    minimum_step_bf is not None
+                    and get_branching_fraction(dm) <= minimum_step_bf
+                ):
+                    continue
+
+                combinations: set[tuple[str, ...]] = {()}
+                for daughter in get_final_state_particle_names(dm):
+                    daughter_states = _final_states(daughter)
+                    # Adding more daughters cannot make an invalid multiset fit.
+                    next_states: set[tuple[str, ...]] = set()
+                    for left in combinations:
+                        for right in daughter_states:
+                            if len(left) + len(right) > len(needed_key):
+                                continue
+                            state = tuple(sorted(left + right))
+                            if _is_submultiset(state, needed_key):
+                                next_states.add(state)
+                    combinations = next_states
+                    if not combinations:
+                        break
+
+                states.update(combinations)
+
+            return tuple(sorted(states))
+
+        def _assign_daughters(
+            daughters: list[str], remaining: tuple[str, ...]
+        ) -> list[list[str | DecayChainDict]]:
+            """Return all ways to distribute ``remaining`` over ``daughters``."""
+            results: list[list[str | DecayChainDict]] = []
+            current: list[str | DecayChainDict] = []
+
+            def _walk(index: int, needed: tuple[str, ...]) -> None:
+                if index == len(daughters):
+                    if not needed:
+                        results.append(current.copy())
+                    return
+
+                name = daughters[index]
+
+                # A daughter that is itself requested is taken as final. It is
+                # not decayed further, even if the .dec file defines decays.
+                if name in needed:
+                    rest = list(needed)
+                    rest.remove(name)
+                    current.append(name)
+                    _walk(index + 1, tuple(rest))
+                    current.pop()
+                    return
+
+                if name in stable_set:
+                    return
+
+                for final_state in _final_states(name):
+                    if not _is_submultiset(final_state, needed):
+                        continue
+
+                    sub_chains = _find_raw(name, final_state)
+                    if not sub_chains:
+                        continue
+
+                    current.append({name: list(sub_chains)})
+                    _walk(index + 1, _remove_submultiset(needed, final_state))
+                    current.pop()
+
+            _walk(0, remaining)
+            return results
+
+        @cache
+        def _find_raw(
+            p_name: str, needed: tuple[str, ...]
+        ) -> tuple[DecayModeDict, ...]:
+            try:
+                modes = self._find_decay_modes(p_name)
+            except DecayNotFound:
+                return ()
+
+            matched: list[DecayModeDict] = []
+
+            for dm in modes:
+                if (
+                    minimum_step_bf is not None
+                    and get_branching_fraction(dm) <= minimum_step_bf
+                ):
+                    continue
+
+                assignments = _assign_daughters(
+                    get_final_state_particle_names(dm), needed
+                )
+                if not assignments:
+                    continue
+
+                d = self._decay_mode_details(dm, display_photos_keyword=False)
+                for fs in assignments:
+                    matched.append(
+                        DecayModeDict(
+                            bf=d["bf"],
+                            fs=fs,
+                            model=d["model"],
+                            model_params=d["model_params"],
+                        )
+                    )
+
+            return tuple(matched)
+
+        # Trigger the usual DecayNotFound for an unknown mother.
+        self._find_decay_modes(mother)
+
+        return {mother: copy.deepcopy(list(_find_raw(mother, needed_key)))}
 
     def __repr__(self) -> str:
         if self._parsed_dec_file is not None:

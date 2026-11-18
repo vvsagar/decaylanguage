@@ -1312,6 +1312,518 @@ def test_build_decay_chains() -> None:
         ]
     }
     assert p.build_decay_chains("D+", stable_particles=["pi0"]) == output
+    # ... and a single string denotes that one stable particle.
+    assert p.build_decay_chains("D+", stable_particles="pi0") == output
+
+
+def _parser_inclusive_fsp() -> DecFileParser:
+    p = DecFileParser.from_string(
+        """Decay A
+  0.5   K+  pi-   PHSP;
+  0.5   B   pi-   PHSP;
+Enddecay
+Decay B
+  1.0   K+  mu-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+    return p
+
+
+def test_build_decay_chains_to_inclusive_fsp() -> None:
+    p = _parser_inclusive_fsp()
+
+    expected = {
+        "A": [
+            # K+ is a direct daughter: the mode is returned unexpanded.
+            {"bf": 0.5, "fs": ["K+", "pi-"], "model": "PHSP", "model_params": ""},
+            # K+ is only found through B, so B is expanded into a sub-chain.
+            {
+                "bf": 0.5,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K+", "mu-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi-",
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            },
+        ]
+    }
+
+    # A bare string, a list and a tuple all denote the same set of FSPs.
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+") == expected
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+"]) == expected
+    assert p.build_decay_chains_to_inclusive_fsp("A", ("K+",)) == expected
+
+    # No chain contains mu+.
+    assert p.build_decay_chains_to_inclusive_fsp("A", "mu+") == {"A": []}
+
+
+def test_build_decay_chains_to_inclusive_fsp_stable_particles() -> None:
+    p = _parser_inclusive_fsp()
+
+    expected = {
+        "A": [{"bf": 0.5, "fs": ["K+", "pi-"], "model": "PHSP", "model_params": ""}]
+    }
+    # A bare string denotes a single stable particle, like a one-element list.
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", "B") == expected
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", ["B"]) == expected
+
+
+def test_build_decay_chains_to_inclusive_fsp_requires_all_fsp() -> None:
+    # K+ and mu+ are in different daughter branches and at different depths,
+    # with unrelated particles (pi-) present as well.
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   D   PHSP;
+Enddecay
+Decay B
+  1.0   C   pi-   PHSP;
+Enddecay
+Decay C
+  1.0   K+  pi-   PHSP;
+Enddecay
+Decay D
+  1.0   mu+ pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    expected = {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 1.0,
+                                "fs": [
+                                    {
+                                        "C": [
+                                            {
+                                                "bf": 1.0,
+                                                "fs": ["K+", "pi-"],
+                                                "model": "PHSP",
+                                                "model_params": "",
+                                            }
+                                        ]
+                                    },
+                                    "pi-",
+                                ],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    {
+                        "D": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["mu+", "pi-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+", "mu+"]) == expected
+
+    # Missing one of the requested particles: nothing is selected.
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+", "e+"]) == {"A": []}
+
+
+def test_build_decay_chains_to_inclusive_fsp_all_in_one_branch() -> None:
+    # Each mode below contains only one of the two FSPs, so no chain
+    # contains both and nothing is selected (AND, not OR).
+    p = DecFileParser.from_string(
+        """Decay A
+  0.5   B   pi-   PHSP;
+  0.5   D   pi-   PHSP;
+Enddecay
+Decay B
+  1.0   K+  pi-   PHSP;
+Enddecay
+Decay D
+  1.0   mu+ pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+", "mu+"]) == {"A": []}
+
+    # Both FSPs in a single (direct) mode: returned unexpanded.
+    q = DecFileParser.from_string(
+        """Decay A
+  1.0   K+  mu+ pi-   PHSP;
+Enddecay
+"""
+    )
+    q.parse()
+    assert q.build_decay_chains_to_inclusive_fsp("A", ["mu+", "K+"]) == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": ["K+", "mu+", "pi-"],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+
+
+def test_build_decay_chains_to_inclusive_fsp_intermediate_particle() -> None:
+    # A requested particle counts wherever it occurs, including as an
+    # intermediate particle whose own sub-chain supplies another FSP.
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   pi-   PHSP;
+Enddecay
+Decay B
+  1.0   K+  pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["B", "K+"]) == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K+", "pi-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi-",
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+
+
+def test_build_decay_chains_to_inclusive_fsp_multiplicity() -> None:
+    # A particle listed twice must occur at least twice in the chain.
+    p = DecFileParser.from_string(
+        """Decay A
+  0.5   K+  pi-   PHSP;
+  0.5   K+  K+  pi- PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    single = {"bf": 0.5, "fs": ["K+", "pi-"], "model": "PHSP", "model_params": ""}
+    double = {
+        "bf": 0.5,
+        "fs": ["K+", "K+", "pi-"],
+        "model": "PHSP",
+        "model_params": "",
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+") == {"A": [single, double]}
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+", "K+"]) == {"A": [double]}
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+"] * 3) == {"A": []}
+
+
+def test_build_decay_chains_to_inclusive_fsp_multiplicity_across_branches() -> None:
+    # The two required K+ are supplied by different branches / levels:
+    # one as a direct daughter, one nested below B.
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   K+  B   PHSP;
+Enddecay
+Decay B
+  1.0   K+  pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    expected = {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": [
+                    "K+",
+                    {
+                        "B": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K+", "pi-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+", "K+"]) == expected
+    # ... but three occurrences do not exist anywhere in the chain.
+    assert p.build_decay_chains_to_inclusive_fsp("A", ["K+"] * 3) == {"A": []}
+
+    # Occurrences beyond the requested multiplicity are allowed.
+    q = DecFileParser.from_string(
+        """Decay A
+  1.0   K+  K+  K+  PHSP;
+Enddecay
+"""
+    )
+    q.parse()
+    assert q.build_decay_chains_to_inclusive_fsp("A", ["K+", "K+"]) == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": ["K+", "K+", "K+"],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+
+
+def test_build_decay_chains_to_inclusive_fsp_minimum_step_bf() -> None:
+    # Modes are deliberately not in descending-BF order in the file.
+    p = DecFileParser.from_string(
+        """Decay A
+  0.1   K+  pi-   PHSP;
+  0.9   B   pi-   PHSP;
+  0.5   K+  mu-   PHSP;
+Enddecay
+Decay B
+  0.05  K+  mu-   PHSP;
+  0.8   K+  pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    direct_low = {"bf": 0.1, "fs": ["K+", "pi-"], "model": "PHSP", "model_params": ""}
+    nested = {
+        "bf": 0.9,
+        "fs": [
+            {
+                "B": [
+                    {
+                        "bf": 0.05,
+                        "fs": ["K+", "mu-"],
+                        "model": "PHSP",
+                        "model_params": "",
+                    },
+                    {
+                        "bf": 0.8,
+                        "fs": ["K+", "pi-"],
+                        "model": "PHSP",
+                        "model_params": "",
+                    },
+                ]
+            },
+            "pi-",
+        ],
+        "model": "PHSP",
+        "model_params": "",
+    }
+    direct_high = {
+        "bf": 0.5,
+        "fs": ["K+", "mu-"],
+        "model": "PHSP",
+        "model_params": "",
+    }
+
+    # No cut: everything matches, in source-file order.
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+") == {
+        "A": [direct_low, nested, direct_high]
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=None) == {
+        "A": [direct_low, nested, direct_high]
+    }
+    # A zero cut also prunes nothing here (all BFs are positive).
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.0) == {
+        "A": [direct_low, nested, direct_high]
+    }
+
+    # Cut 0.2: the 0.1 direct mode and B's 0.05 mode are pruned, but the
+    # returned modes keep source order (0.9 before 0.5), not BF order.
+    nested_pruned = {
+        **nested,
+        "fs": [
+            {"B": [nested["fs"][0]["B"][1]]},  # type: ignore[index]
+            "pi-",
+        ],
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.2) == {
+        "A": [nested_pruned, direct_high]
+    }
+
+    # Boundary: modes with bf == minimum_step_bf are pruned (<= semantics).
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.5) == {
+        "A": [nested_pruned]
+    }
+
+    # Everything below the cut.
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.95) == {
+        "A": []
+    }
+
+
+def test_inclusive_fsp_only_reads_model_details_for_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = DecFileParser.from_string(
+        """Decay A
+0.7 K+ PHSP;
+0.2 B PHSP;
+0.09 pi+ PHSP;
+0.01 K+ PHSP;
+Enddecay
+Decay B
+1.0 K+ PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    inspected_bfs = []
+
+    def track_model_name(mode: Tree) -> str:
+        inspected_bfs.append(get_branching_fraction(mode))
+        return get_model_name(mode)
+
+    monkeypatch.setattr("decaylanguage.dec.dec.get_model_name", track_model_name)
+    result = p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.05)
+
+    assert [mode["bf"] for mode in result["A"]] == [0.7, 0.2]
+    assert sorted(inspected_bfs) == [0.2, 0.7, 1.0]
+
+
+def test_build_decay_chains_to_inclusive_fsp_minimum_step_bf_daughter_filtered() -> (
+    None
+):
+    """If all of a daughter's modes are cut, the parent mode cannot match."""
+    p = DecFileParser.from_string(
+        """Decay A
+  0.9   B   pi-   PHSP;
+Enddecay
+Decay B
+  0.05  K+  mu-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+") == {
+        "A": [
+            {
+                "bf": 0.9,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 0.05,
+                                "fs": ["K+", "mu-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi-",
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+    assert p.build_decay_chains_to_inclusive_fsp("A", "K+", minimum_step_bf=0.2) == {
+        "A": []
+    }
+
+
+def test_build_decay_chains_to_inclusive_fsp_invalid_input() -> None:
+    p = _parser_inclusive_fsp()
+
+    with pytest.raises(TypeError, match="fsp"):
+        p.build_decay_chains_to_inclusive_fsp("A", 123)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="fsp"):
+        p.build_decay_chains_to_inclusive_fsp("A", ["K+", 123])  # type: ignore[list-item]
+    with pytest.raises(TypeError, match="stable_particles"):
+        p.build_decay_chains_to_inclusive_fsp("A", "K+", 123)  # type: ignore[arg-type]
+
+    with pytest.raises(DecayNotFound):
+        p.build_decay_chains_to_inclusive_fsp("unknown", "K+")
+
+
+def test_build_decay_chains_to_inclusive_fsp_cycle() -> None:
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   pi-   PHSP;
+Enddecay
+Decay B
+  1.0   A   pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    with pytest.raises(ValueError, match=r"Cycle detected.*A -> B -> A"):
+        p.build_decay_chains_to_inclusive_fsp("A", "K+")
+
+
+def test_build_decay_chains_to_inclusive_fsp_shared_daughters_are_copied() -> None:
+    """Repeated daughters share a cached raw result but must not alias it."""
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   B   PHSP;
+Enddecay
+Decay B
+  1.0   K+  mu-   VSS_BMIX 1.0;
+Enddecay
+"""
+    )
+    p.parse()
+
+    result = p.build_decay_chains_to_inclusive_fsp("A", "K+")
+    first, second = result["A"][0]["fs"]
+    assert first == second
+    assert first is not second
+    assert isinstance(first, dict)
+    assert isinstance(second, dict)
+
+    # Mutating one copy, including its parameter list, must not affect the other.
+    first["B"][0]["bf"] = -1
+    params = first["B"][0]["model_params"]
+    assert isinstance(params, list)
+    params.clear()
+    assert second["B"][0]["bf"] == 1.0
+    assert len(second["B"][0]["model_params"]) == 1
+
+    again = p.build_decay_chains_to_inclusive_fsp("A", "K+")
+    assert again["A"][0]["fs"][0] == second
 
 
 def test_build_decay_chains_minimum_effective_bf_zero_is_no_filter() -> None:
@@ -1331,6 +1843,63 @@ def test_build_decay_chains_minimum_effective_bf_none_is_no_filter() -> None:
     assert p.build_decay_chains(
         "D*+", minimum_effective_bf=None
     ) == p.build_decay_chains("D*+")
+
+
+def test_build_decay_chains_minimum_effective_bf_preserves_source_order() -> None:
+    """The surviving modes stay in file order."""
+    p = DecFileParser.from_string(
+        """Decay D0
+  0.1   K-  pi+   PHSP;
+  0.25  pi+ pi-   PHSP;
+  0.6   mu+ mu-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    chains = p.build_decay_chains("D0", minimum_effective_bf=0.2)
+
+    # 0.1 is pruned; the two survivors are *not* in descending-BF order.
+    assert [mode["bf"] for mode in chains["D0"]] == [0.25, 0.6]
+
+
+def test_build_decay_chains_minimum_effective_bf_with_signed_input() -> None:
+    """A failed mode does not imply the next one fails on a signed path."""
+    p = DecFileParser.from_string(
+        """Decay D+
+-0.5 K_S0 pi+ PHSP;
+Enddecay
+Decay K_S0
+1.2 pi+ pi- PHSP;
+0.2 pi0 pi0 PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    chains = p.build_decay_chains("D+", minimum_effective_bf=-0.5)
+    daughter = chains["D+"][0]["fs"][0]
+    assert isinstance(daughter, dict)
+    assert [mode["bf"] for mode in daughter["K_S0"]] == [0.2]
+
+
+@pytest.mark.parametrize("threshold", [None, 0.0, 0.5])
+def test_build_decay_chains_empty_daughter_is_stable(
+    threshold: float | None,
+) -> None:
+    p = DecFileParser.from_string(
+        """Decay D+
+1.0 K_S0 pi+ PHSP;
+Enddecay
+Decay K_S0
+Enddecay
+"""
+    )
+    p.parse()
+
+    assert p.build_decay_chains("D+", minimum_effective_bf=threshold) == {
+        "D+": [{"bf": 1.0, "fs": ["K_S0", "pi+"], "model": "PHSP", "model_params": ""}]
+    }
 
 
 def test_build_decay_chains_minimum_effective_bf_no_output() -> None:
@@ -1603,6 +2172,260 @@ def test_build_decay_chains_minimum_effective_bf_first_daughter_filtered() -> No
         p.build_decay_chains("D*+", stable_particles=["D+"], minimum_effective_bf=0.304)
         == expected
     )
+
+
+def test_build_decay_chains_to_specific_fsp() -> None:
+    p = DecFileParser(DIR / "../data/test_example_Dst.dec")
+    p.parse()
+
+    assert p.build_decay_chains_to_specific_fsp("D*+", fsp=["K-", "pi+", "pi+"]) == {
+        "D*+": [
+            {
+                "bf": 0.677,
+                "fs": [
+                    {
+                        "D0": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K-", "pi+"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi+",
+                ],
+                "model": "VSS",
+                "model_params": "",
+            }
+        ]
+    }
+
+    # Multiplicities matter: a single pi+ is not enough.
+    assert p.build_decay_chains_to_specific_fsp("D*+", fsp=["K-", "pi+"]) == {"D*+": []}
+
+    # A single string denotes one stable particle, like a one-element list.
+    assert p.build_decay_chains_to_specific_fsp(
+        "D+", stable_particles="pi0", fsp=["K-", "pi+", "pi+", "pi0"]
+    ) == p.build_decay_chains_to_specific_fsp(
+        "D+", stable_particles=["pi0"], fsp=["K-", "pi+", "pi+", "pi0"]
+    )
+
+
+def test_build_decay_chains_to_specific_fsp_fsp_is_required() -> None:
+    p = DecFileParser(DIR / "../data/test_example_Dst.dec")
+    p.parse()
+
+    # fsp is mandatory: omitting it (or passing None) is a TypeError, not an
+    # empty result.
+    with pytest.raises(TypeError):
+        p.build_decay_chains_to_specific_fsp("D*+")  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="fsp"):
+        p.build_decay_chains_to_specific_fsp("D*+", fsp=None)  # type: ignore[arg-type]
+
+
+def test_build_decay_chains_to_specific_fsp_multi_body_split() -> None:
+    p = DecFileParser(DIR / "../data/test_Bd2DstDst.dec")
+    p.parse()
+
+    fsp = [
+        "K+",
+        "pi-",
+        "pi-",
+        "pi0",
+        "K-",
+        "pi-",
+        "pi+",
+        "pi+",
+        "pi+",
+    ]
+    result = p.build_decay_chains_to_specific_fsp("B0sig", fsp=fsp)
+
+    assert len(result["B0sig"]) == 1
+    mode = result["B0sig"][0]
+    assert mode["bf"] == 1.0
+    assert {next(iter(x)) for x in mode["fs"] if isinstance(x, dict)} == {
+        "MyFirstD*-",
+        "MySecondD*+",
+    }
+
+
+def test_specific_fsp_only_reads_model_details_for_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = DecFileParser.from_string(
+        """Decay A
+0.01 K+ pi- PHSP;
+0.2 B pi- PHSP;
+0.09 mu+ pi- PHSP;
+0.7 K+ pi- PHSP;
+Enddecay
+Decay B
+1.0 K+ PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    inspected_bfs = []
+
+    def track_model_name(mode: Tree) -> str:
+        inspected_bfs.append(get_branching_fraction(mode))
+        return get_model_name(mode)
+
+    monkeypatch.setattr("decaylanguage.dec.dec.get_model_name", track_model_name)
+    result = p.build_decay_chains_to_specific_fsp(
+        "A", ["K+", "pi-"], minimum_step_bf=0.05
+    )
+
+    assert [mode["bf"] for mode in result["A"]] == [0.2, 0.7]
+    assert sorted(inspected_bfs) == [0.2, 0.7, 1.0]
+
+
+def test_specific_fsp_rejects_daughter_states_that_cannot_fit() -> None:
+    p = DecFileParser.from_string(
+        """Decay A
+1.0 B pi- PHSP;
+Enddecay
+Decay B
+0.4 pi+ pi+ PHSP;
+0.3 pi+ pi+ pi+ PHSP;
+0.2 pi+ mu+ PHSP;
+0.1 C pi+ PHSP;
+Enddecay
+Decay C
+1.0 pi+ PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    result = p.build_decay_chains_to_specific_fsp(
+        "A", ["pi+", "pi+", "pi-"], stable_particles="C"
+    )
+
+    assert len(result["A"]) == 1
+    daughter, bachelor = result["A"][0]["fs"]
+    assert bachelor == "pi-"
+    assert isinstance(daughter, dict)
+    assert [mode["bf"] for mode in daughter["B"]] == [0.4]
+
+
+def test_build_decay_chains_to_specific_fsp_minimum_step_bf() -> None:
+    p = DecFileParser(DIR / "../data/test_Bd2DstDst.dec")
+    p.parse()
+
+    fsp = [
+        "K+",
+        "pi-",
+        "pi-",
+        "pi0",
+        "K-",
+        "pi-",
+        "pi+",
+        "pi+",
+        "pi+",
+    ]
+
+    # MyD- -> K+ pi- pi- has BF 0.7, so the whole chain is pruned.
+    assert p.build_decay_chains_to_specific_fsp(
+        "B0sig", fsp=fsp, minimum_step_bf=0.8
+    ) == {"B0sig": []}
+
+    # The cut is applied at every step and the local cache is not reused
+    # across calls with a different threshold.
+    assert p.build_decay_chains_to_specific_fsp("B0sig", fsp=fsp, minimum_step_bf=0.5)[
+        "B0sig"
+    ]
+
+
+def test_build_decay_chains_to_specific_fsp_argument_order() -> None:
+    # fsp is the second positional argument and stable_particles the third,
+    # mirroring build_decay_chains_to_inclusive_fsp.
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   pi-   PHSP;
+Enddecay
+Decay B
+  1.0   K+  pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    assert p.build_decay_chains_to_specific_fsp("A", ["K+", "pi-", "pi-"]) == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K+", "pi-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi-",
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+    # Treating B as stable makes it a final particle itself.
+    assert p.build_decay_chains_to_specific_fsp("A", ["B", "pi-"], "B") == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": ["B", "pi-"],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+
+
+def test_build_decay_chains_to_specific_fsp_default_minimum_step_bf_is_none() -> None:
+    # By default no BF cut is applied, so even a mode below 1e-4 is kept.
+    p = DecFileParser.from_string(
+        """Decay A
+  1.0   B   pi-   PHSP;
+Enddecay
+Decay B
+  1e-05 K+  pi-   PHSP;
+Enddecay
+"""
+    )
+    p.parse()
+
+    assert p.build_decay_chains_to_specific_fsp("A", fsp=["K+", "pi-", "pi-"]) == {
+        "A": [
+            {
+                "bf": 1.0,
+                "fs": [
+                    {
+                        "B": [
+                            {
+                                "bf": 1e-05,
+                                "fs": ["K+", "pi-"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi-",
+                ],
+                "model": "PHSP",
+                "model_params": "",
+            }
+        ]
+    }
+    assert p.build_decay_chains_to_specific_fsp(
+        "A", fsp=["K+", "pi-", "pi-"], minimum_step_bf=1e-4
+    ) == {"A": []}
 
 
 def test_expand_decay_chains() -> None:

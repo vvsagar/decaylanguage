@@ -5,6 +5,14 @@
 * New API:
   - Added `decaylanguage.decay_chain_to_dataframe` (and `DecayChain.to_dataframe`) to tabulate a decay chain as a `pandas.DataFrame`.
 * Parsing of decay files (aka .dec files):
+  - Speed up `DecFileParser.build_decay_chains` when `minimum_effective_bf` is
+    set by skipping modes below the threshold before extracting their decay
+    details, while preserving source-file order.
+  - Fixed `DecFileParser.build_decay_chains` treating a daughter with an empty
+    decay table as invalidating its parent mode when `minimum_effective_bf` is
+    set; such a daughter is now correctly treated as stable.
+  - Apply per-step branching-fraction cuts in file order for inclusive and
+    specific final-state searches, without sorting.
   - Speed up parsing of large decay files by scanning top-level statements directly instead of walking the whole parse tree, and by skipping the model-alias rewrite for decays that use no model alias.
     Custom grammars and extra Lark options keep the previous recursive scan.
 * Dependencies:
