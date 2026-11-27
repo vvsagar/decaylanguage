@@ -1614,6 +1614,91 @@ def test_build_decay_chains_minimum_effective_bf_first_daughter_filtered() -> No
     )
 
 
+def test_build_decay_chains_to_specific_fsp() -> None:
+    p = DecFileParser(DIR / "../data/test_example_Dst.dec")
+    p.parse()
+
+    assert p.build_decay_chains_to_specific_fsp("D*+", fsp=["K-", "pi+", "pi+"]) == {
+        "D*+": [
+            {
+                "bf": 0.677,
+                "fs": [
+                    {
+                        "D0": [
+                            {
+                                "bf": 1.0,
+                                "fs": ["K-", "pi+"],
+                                "model": "PHSP",
+                                "model_params": "",
+                            }
+                        ]
+                    },
+                    "pi+",
+                ],
+                "model": "VSS",
+                "model_params": "",
+            }
+        ]
+    }
+
+    # Multiplicities matter: a single pi+ is not enough.
+    assert p.build_decay_chains_to_specific_fsp("D*+", fsp=["K-", "pi+"]) == {"D*+": []}
+
+
+def test_build_decay_chains_to_specific_fsp_multi_body_split() -> None:
+    p = DecFileParser(DIR / "../data/test_Bd2DstDst.dec")
+    p.parse()
+
+    fsp = [
+        "K+",
+        "pi-",
+        "pi-",
+        "pi0",
+        "K-",
+        "pi-",
+        "pi+",
+        "pi+",
+        "pi+",
+    ]
+    result = p.build_decay_chains_to_specific_fsp("B0sig", fsp=fsp)
+
+    assert len(result["B0sig"]) == 1
+    mode = result["B0sig"][0]
+    assert mode["bf"] == 1.0
+    assert {next(iter(x)) for x in mode["fs"] if isinstance(x, dict)} == {
+        "MyFirstD*-",
+        "MySecondD*+",
+    }
+
+
+def test_build_decay_chains_to_specific_fsp_minimum_step_bf() -> None:
+    p = DecFileParser(DIR / "../data/test_Bd2DstDst.dec")
+    p.parse()
+
+    fsp = [
+        "K+",
+        "pi-",
+        "pi-",
+        "pi0",
+        "K-",
+        "pi-",
+        "pi+",
+        "pi+",
+        "pi+",
+    ]
+
+    # MyD- -> K+ pi- pi- has BF 0.7, so the whole chain is pruned.
+    assert p.build_decay_chains_to_specific_fsp(
+        "B0sig", fsp=fsp, minimum_step_bf=0.8
+    ) == {"B0sig": []}
+
+    # The cut is applied at every step and the local cache is not reused
+    # across calls with a different threshold.
+    assert p.build_decay_chains_to_specific_fsp("B0sig", fsp=fsp, minimum_step_bf=0.5)[
+        "B0sig"
+    ]
+
+
 def test_expand_decay_chains() -> None:
     p = DecFileParser(DIR / "../data/test_example_Dst.dec")
     p.parse()
