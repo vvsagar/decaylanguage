@@ -4,6 +4,9 @@
 
 * New API:
   - Added `decaylanguage.decay_chain_to_dataframe` (and `DecayChain.to_dataframe`) to tabulate a decay chain as a `pandas.DataFrame`.
+* Parsing of decay files (aka .dec files):
+  - Speed up parsing of large decay files by scanning top-level statements directly instead of walking the whole parse tree, and by skipping the model-alias rewrite for decays that use no model alias.
+    Custom grammars and extra Lark options keep the previous recursive scan.
 * Dependencies:
   - Require dependency on ``Particle`` >= 1.1.0
     to pick up the PDG ID scheme changes for tetraquarks and pentaquarks.

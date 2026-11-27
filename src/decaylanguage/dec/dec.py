@@ -43,7 +43,7 @@ import os
 import re
 import warnings
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from functools import cache
 from io import StringIO
 from itertools import chain, zip_longest
@@ -171,6 +171,15 @@ class MisconfiguredChargeConjWarning(DecFileWarning):
 
 class SelfChargeConjWarning(DecFileWarning):
     code = "DLW012"
+
+
+class _BundledDecFileTree(Tree[Token]):
+    """Mark a file root whose tree layout is guaranteed by the bundled grammar."""
+
+
+@cache
+def _bundled_decfile_grammar() -> str:
+    return data.basepath.joinpath("decfile.lark").read_text(encoding="utf-8")
 
 
 @cache
@@ -370,9 +379,10 @@ class DecFileParser:
         # In the common case (no extra grammar options), reuse a cached parser
         # keyed on the grammar text, parser/lexer choice and decay-model names,
         # since building a Lark parser is comparatively expensive.
+        grammar = self.grammar()
         if extraopts:
             parser = Lark(
-                self.grammar(),
+                grammar,
                 parser=opts["parser"],
                 lexer=opts["lexer"],
                 edit_terminals=opts["edit_terminals"],
@@ -380,13 +390,13 @@ class DecFileParser:
             )
         else:
             parser = _build_lark_parser(
-                self.grammar(),
+                grammar,
                 opts["parser"],
                 opts["lexer"],
                 self._decay_models_tuple(),
             )
         try:
-            self._parsed_dec_file = parser.parse(self._dec_file)
+            parsed_file = parser.parse(self._dec_file)
         except UnexpectedInput as exc:
             # Preserve the active grammar's literal spellings for diagnostics,
             # including custom grammars, without relying on Lark's private state.
@@ -398,6 +408,14 @@ class DecFileParser:
             self._set_exception_source(exc)
             raise
 
+        # Only the bundled grammar without extra Lark options guarantees the
+        # layout used by the direct scans below. Mark just the root, not each node.
+        if not extraopts and grammar == _bundled_decfile_grammar():
+            parsed_file = _BundledDecFileTree(
+                parsed_file.data, parsed_file.children, parsed_file.meta
+            )
+        self._parsed_dec_file = parsed_file
+
         # At last, find all particle decays defined in the .dec decay file ...
         self._find_parsed_decays()
         assert self._parsed_decays is not None
@@ -407,11 +425,13 @@ class DecFileParser:
         # DecayModelParamValueReplacement do not leak across decay trees.
         try:
             dict_model_aliases = self._resolve_model_aliases()
-            self._check_unresolved_models(set(dict_model_aliases))
+            needs_replacement = self._check_unresolved_models(set(dict_model_aliases))
             self._parsed_decays = [
                 DecayModelAliasReplacement(
                     model_alias_defs=dict_model_aliases
                 ).transform(tree)
+                if id(tree) in needs_replacement
+                else tree
                 for tree in self._parsed_decays
             ]
         except VisitError as exc:
@@ -501,19 +521,24 @@ class DecFileParser:
             resolved[name] = children
             return children
 
-        for definition in self._parsed_dec_file.find_data("model_alias"):
+        for definition in _top_level_trees(self._parsed_dec_file, "model_alias"):
             token = definition.children[0].children[0]
             assert isinstance(token, Token)
             resolve(str(token), token)
         return resolved
 
-    def _check_unresolved_models(self, model_aliases: set[str]) -> None:
-        """Avoid treating a parameter or daughter as an unknown model name."""
+    def _check_unresolved_models(self, model_aliases: set[str]) -> set[int]:
+        """Avoid treating a parameter or daughter as an unknown model name.
+
+        Return the IDs of trees to transform. With the bundled grammar, skip
+        trees without aliases; for custom layouts, transform every tree.
+        """
         assert self._parsed_decays is not None
         assert self._parsed_dec_file is not None
+        direct = isinstance(self._parsed_dec_file, _BundledDecFileTree)
         declared_particles = set(self.dict_aliases()) | {
             str(tree.children[0])
-            for tree in self._parsed_dec_file.find_data("particle_def")
+            for tree in _top_level_trees(self._parsed_dec_file, "particle_def")
         }
 
         def is_particle(token: Token) -> bool:
@@ -521,11 +546,14 @@ class DecFileParser:
                 str(token)
             )
 
+        trees_needing_alias_replacement: set[int] = set()
         for decay in self._parsed_decays:
-            for line in decay.find_data("decayline"):
-                model = next(line.find_data("model"))
+            needs_replacement = not direct
+            for line in _matching_trees(decay, "decayline", direct=direct):
+                model = next(_matching_trees(line, "model", direct=direct))
                 if not isinstance(model.children[0], Tree):
                     continue
+                needs_replacement = True
                 token = model.children[0].children[0]
                 assert isinstance(token, Token)
                 # A defined alias has a known boundary, even when daughters
@@ -550,6 +578,9 @@ class DecFileParser:
                         line=location.line,
                         column=location.column,
                     )
+            if needs_replacement:
+                trees_needing_alias_replacement.add(id(decay))
+        return trees_needing_alias_replacement
 
     def grammar(self) -> str:
         """
@@ -643,8 +674,11 @@ class DecFileParser:
         for parser, lexer and options.
         """
 
-        with data.basepath.joinpath(filename).open() as f1:
-            self._grammar = f1.read()
+        self._grammar = (
+            _bundled_decfile_grammar()
+            if filename == "decfile.lark"
+            else data.basepath.joinpath(filename).read_text(encoding="utf-8")
+        )
 
         self._grammar_info = {
             "lark_file": filename,
@@ -736,7 +770,7 @@ class DecFileParser:
         assert self._parsed_dec_file is not None
         return {
             tree.children[0].children[0].value: copy.deepcopy(tree.children[1].children)
-            for tree in self._parsed_dec_file.find_data("model_alias")
+            for tree in _top_level_trees(self._parsed_dec_file, "model_alias")
         }
 
     def dict_aliases(self) -> dict[str, str]:
@@ -1957,6 +1991,23 @@ def get_model_parameters(decay_mode: Tree) -> str | list[str | Any]:
     return [_value(tree) for tree in lmo[0].children] if len(lmo) == 1 else ""
 
 
+def _matching_trees(tree: Tree, rule: str, *, direct: bool) -> Iterator[Tree]:
+    if not direct:
+        return tree.find_data(rule)
+    return (
+        child
+        for child in tree.children
+        if isinstance(child, Tree) and child.data == rule
+    )
+
+
+def _top_level_trees(parsed_file: Tree, rule: str) -> Iterator[Tree]:
+    """Find statements without walking every decay when the file layout is known."""
+    return _matching_trees(
+        parsed_file, rule, direct=isinstance(parsed_file, _BundledDecFileTree)
+    )
+
+
 def get_decays(parsed_file: Tree) -> list[Tree]:
     """
     Return a list of all decay definitions in the input parsed file,
@@ -1972,7 +2023,7 @@ def get_decays(parsed_file: Tree) -> list[Tree]:
         Input parsed file.
     """
     try:
-        return list(parsed_file.find_data("decay"))
+        return list(_top_level_trees(parsed_file, "decay"))
     # This line should never be reached given that Lark's find_data
     # returns an iterator and we then provide in the "worst-case scenario" an empty list.
     except Exception as err:  # pragma: no cover
@@ -1995,7 +2046,7 @@ def get_charge_conjugate_decays(parsed_file: Tree) -> list[str]:
 
     try:
         return sorted(
-            tree.children[0].value for tree in parsed_file.find_data("cdecay")
+            tree.children[0].value for tree in _top_level_trees(parsed_file, "cdecay")
         )
     # This line should never be reached given that Lark's find_data
     # returns an iterator and we then provide in the "worst-case scenario" an empty list.
@@ -2036,11 +2087,11 @@ def _extract_two_token_dict(
                 tree.children[0].children[0].value: value_converter(
                     tree.children[1].children[0].value
                 )
-                for tree in parsed_file.find_data(rule)
+                for tree in _top_level_trees(parsed_file, rule)
             }
         return {
             tree.children[0].value: value_converter(tree.children[1].value)
-            for tree in parsed_file.find_data(rule)
+            for tree in _top_level_trees(parsed_file, rule)
         }
     # This line should never be reached given that Lark's find_data
     # returns an iterator and we then provide in the "worst-case scenario" an empty dict.

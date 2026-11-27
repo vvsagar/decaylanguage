@@ -843,6 +843,34 @@ def test_unknown_model_in_alias_definition(used: bool, parameters: str) -> None:
     assert (caught.value.line, caught.value.column) == (1, 14)
 
 
+@pytest.mark.parametrize(
+    ("rule", "replacement", "extra_rule"),
+    [
+        ("?line :", "line :", ""),
+        ("decayline*", "mode_wrapper*", "mode_wrapper: decayline\n"),
+        (
+            "photos? model _NEWLINE+",
+            "photos? model_wrapper _NEWLINE+",
+            "model_wrapper: model\n",
+        ),
+    ],
+    ids=["statement-wrapper", "decay-line-wrapper", "model-wrapper"],
+)
+def test_custom_grammar_wrappers(rule: str, replacement: str, extra_rule: str) -> None:
+    parser = DecFileParser.from_string(
+        "Define dm 0.5\nModelAlias A VSS_BMIX dm;\nDecay B0\n1.0 pi+ pi- A;\nEnddecay\n"
+    )
+    parser._grammar = parser.grammar().replace(rule, replacement) + extra_rule
+    parser.parse()
+
+    assert parser.list_decay_mother_names() == ["B0"]
+    assert parser.dict_definitions() == {"dm": 0.5}
+    assert parser.list_decay_modes("B0") == [["pi+", "pi-"]]
+    (mode,) = parser._find_decay_modes("B0")
+    assert get_model_name(mode) == "VSS_BMIX"
+    assert get_model_parameters(mode) == [0.5]
+
+
 def test_model_alias_chain_resolves_parameters_independently() -> None:
     parser = DecFileParser.from_string(
         "Define dm 0.507e12\nModelAlias A B;\nModelAlias B VSS_BMIX dm;\n"
