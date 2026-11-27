@@ -1237,6 +1237,58 @@ Continuing but be warned of possible side effects ..."""
                 f"Decays of particle '{mother}' not found in .dec file!"
             ) from None
 
+    @staticmethod
+    def _normalize_particle_names(
+        value: str | Iterable[str], name: str
+    ) -> tuple[str, ...]:
+        # A single string names one particle; otherwise expect an iterable of
+        # particle names. Normalize to a tuple either way.
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, Iterable):
+            result = tuple(value)
+            if all(isinstance(item, str) for item in result):
+                return result
+        raise TypeError(
+            f"{name} must be a particle name or an iterable of particle "
+            f"names, got {value!r}"
+        )
+
+    def _modes_in_pruning_order_factory(
+        self, sort_for_pruning: bool
+    ) -> Callable[[str], tuple[tuple[int, Any], ...]]:
+        """Return a cached lookup of decay modes in pruning order.
+
+        Each mode is paired with its index in the .dec file, so callers can
+        restore the source-file order after pruning. When ``sort_for_pruning``
+        is set, modes are sorted by descending branching fraction, which
+        lets callers stop at the first mode below a BF cut. The ordering of
+        each mother is computed only once, however often it is revisited.
+        The cache lives as long as the returned callable, so callers create
+        a fresh one per top-level call.
+        """
+        ordered_modes: dict[str, tuple[tuple[int, Any], ...]] = {}
+
+        def _modes_in_pruning_order(p_name: str) -> tuple[tuple[int, Any], ...]:
+            try:
+                return ordered_modes[p_name]
+            except KeyError:
+                modes = self._find_decay_modes(p_name)
+                if not sort_for_pruning:
+                    ordered = tuple(enumerate(modes))
+                else:
+                    ordered = tuple(
+                        sorted(
+                            enumerate(modes),
+                            key=lambda item: get_branching_fraction(item[1]),
+                            reverse=True,
+                        )
+                    )
+                ordered_modes[p_name] = ordered
+                return ordered
+
+        return _modes_in_pruning_order
+
     def list_decay_modes(
         self, mother: str, is_pdg_name: bool = False
     ) -> list[list[str]]:
@@ -1464,7 +1516,7 @@ Continuing but be warned of possible side effects ..."""
     def build_decay_chains(
         self,
         mother: str,
-        stable_particles: list[str] | set[str] | tuple[str] | tuple[()] = (),
+        stable_particles: str | Iterable[str] = (),
         minimum_effective_bf: float | None = None,
     ) -> dict[str, list[DecayModeDict]]:
         """
@@ -1529,7 +1581,9 @@ Continuing but be warned of possible side effects ..."""
         {'D+': [{'bf': 1.0, 'fs': ['K-', 'pi+', 'pi+', 'pi0'], 'model': 'PHSP', 'model_params': ''}]}
         """
         # Standardize inputs for hashing
-        stable_set = frozenset(stable_particles)
+        stable_set = frozenset(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        )
 
         # Only a positive threshold permits early termination in descending BF
         # order. For other thresholds, signed BFs can still be filtered, and
@@ -1547,27 +1601,7 @@ Continuing but be warned of possible side effects ..."""
         # Cache the modes of each mother in pruning order. The same mother is
         # revisited under many effective-BF cache keys, so sorting it only once
         # avoids repeated branching-fraction extraction and sorting.
-        ordered_modes: dict[str, tuple[tuple[int, Any], ...]] = {}
-
-        def _modes_in_pruning_order(p_name: str) -> tuple[tuple[int, Any], ...]:
-            try:
-                return ordered_modes[p_name]
-            except KeyError:
-                modes = self._find_decay_modes(p_name)
-                if not sort_for_pruning:
-                    ordered = tuple(enumerate(modes))
-                else:
-                    # Descending BF lets the loop below stop at the first mode
-                    # failing the cut, since all following ones fail too.
-                    ordered = tuple(
-                        sorted(
-                            enumerate(modes),
-                            key=lambda item: get_branching_fraction(item[1]),
-                            reverse=True,
-                        )
-                    )
-                ordered_modes[p_name] = ordered
-                return ordered
+        _modes_in_pruning_order = self._modes_in_pruning_order_factory(sort_for_pruning)
 
         # Define the actual computation logic within a helper function.
         # This function returns the raw, mutable result, which is cached.
@@ -1637,30 +1671,40 @@ Continuing but be warned of possible side effects ..."""
     def build_decay_chains_to_inclusive_fsp(
         self,
         mother: str,
-        fsp: str | list[str],
-        stable_particles: Iterable[str] = (),
-        multi: bool = True,
-        only_direct_daughters: bool = False,
+        fsp: str | Iterable[str],
+        stable_particles: str | Iterable[str] = (),
+        minimum_step_bf: float | None = None,
     ) -> dict[str, list[DecayModeDict]]:
         """
         Build decay chains leading to a set of inclusive final-state particles.
 
         This method finds all decay chains from the given mother particle that contain
-        any of the specified final-state particles (FSPs) somewhere in the decay chain.
+        *all* of the specified final-state particles (FSPs) somewhere in the decay
+        chain, at any level: they may be direct daughters, intermediate particles,
+        or appear in different daughter branches. Multiplicities matter: a particle
+        listed twice must occur at least twice in the chain. Other particles may
+        also be present; unlike :meth:`build_decay_chains_to_specific_fsp`, the
+        chain's final state need not consist of exactly the requested FSPs. As
+        soon as all FSPs (with their multiplicities) are found as direct daughters,
+        the search stops there for that mode: the matching mode is returned with
+        its (unexpanded) daughters.
 
         Parameters
         ----------
         mother : str
             The mother particle name.
-        fsp : str or list[str]
-            The final-state particle(s) to search for. If ``multi=False``, a single
-            string is accepted and converted to a list internally.
-        stable_particles : iterable, optional
-            Particles to consider as stable (stop the decay chain there).
-        multi : bool, optional, default=True
-            If False, treat ``fsp`` as a single string rather than a list.
-        only_direct_daughters : bool, optional, default=False
-            If True, only consider direct daughter particles (no recursive search).
+        fsp : str or iterable of str
+            The final-state particle(s) to search for. A single string is treated
+            as one particle; any other iterable is taken as the particles to
+            search for, with multiplicities mattering (see above).
+        stable_particles : str or iterable of str, optional
+            Particles to consider as stable (stop the decay chain there). A single
+            string is treated as one particle.
+        minimum_step_bf : float or None, optional, default=None
+            Minimum branching fraction required at every decay step. Modes with
+            a branching fraction less than or equal to this value are dropped
+            and not descended into. If ``None``, no per-step BF cut is applied.
+            Returned modes keep the order in which they appear in the .dec file.
 
         Returns
         -------
@@ -1668,56 +1712,204 @@ Continuing but be warned of possible side effects ..."""
             A dictionary mapping the mother particle name to a list of
             matching decay modes with their branching fractions, final states,
             and model information.
+
+        Raises
+        ------
+        DecayNotFound
+            If no decays are defined for ``mother`` in the parsed file.
+        TypeError
+            If ``fsp`` or ``stable_particles`` is neither a string nor an
+            iterable of strings.
+        ValueError
+            If the decay chain contains a cycle.
         """
-        if not stable_particles:
-            stable_particles_tuple: tuple[str, ...] = ()
-        else:
-            stable_particles_tuple = tuple(stable_particles)
 
-        assert isinstance(fsp, list) if multi else isinstance(fsp, str)
-        fsp_list = [fsp] if isinstance(fsp, str) else list(fsp)
+        fsp_tuple = self._normalize_particle_names(fsp, "fsp")
+        # Distinct targets in order of first appearance, and how many
+        # occurrences of each are required.
+        targets = tuple(dict.fromkeys(fsp_tuple))
+        target_index = {name: i for i, name in enumerate(targets)}
+        needed_counts = tuple(fsp_tuple.count(name) for name in targets)
+        stable_set = frozenset(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        )
 
-        info: list[DecayModeDict] = []
-        for dm in self._find_decay_modes(mother):
-            d = self._decay_mode_details(dm, display_photos_keyword=False)
+        # Sorting by BF lets us stop at the first mode below the per-step cut.
+        sort_for_pruning = minimum_step_bf is not None and minimum_step_bf > 0
 
-            if any(f in d["fs"] for f in fsp_list):
-                info.append(d)
+        _modes_in_pruning_order = self._modes_in_pruning_order_factory(sort_for_pruning)
 
-            elif not only_direct_daughters:
-                append = False
-                for i, fs in enumerate(d["fs"]):
-                    if fs in stable_particles_tuple:
+        # Particle names currently being expanded, in recursion order. A
+        # daughter already on this stack means the .dec file contains a
+        # cycle, which would otherwise recurse forever. Completed (cached)
+        # subtrees are no longer on the stack, so shared daughters are fine.
+        in_progress: list[str] = []
+
+        def _add_counts(
+            counts: tuple[int, ...], extra: tuple[int, ...]
+        ) -> tuple[int, ...]:
+            # Component-wise sum, capped at the requested multiplicities:
+            # occurrences beyond the requested ones are allowed, so counts
+            # only need to distinguish "found k of the required n".
+            return tuple(
+                min(needed, found + more)
+                for needed, found, more in zip(
+                    needed_counts, counts, extra, strict=True
+                )
+            )
+
+        empty_counts = tuple(0 for _ in targets)
+
+        if not targets:
+            # No particle is requested, so no chain is selected (and a direct
+            # "all of nothing" match must not return every mode).
+            self._find_decay_modes(mother)  # trigger the usual DecayNotFound
+            return {mother: []}
+
+        # For each particle, compute -- for every count vector over the target
+        # FSPs -- the decay modes of that particle whose chain contains at
+        # least that many occurrences of each target somewhere (direct
+        # daughters, intermediates, or deeper). The count vectors are the
+        # state of a small DP over the daughters of each mode: combining a
+        # mode's daughters adds their count vectors (capped), so targets
+        # split across different branches or levels are handled, and
+        # particles beyond the requested ones are allowed. Only non-zero
+        # count vectors are kept, since a daughter is only expanded when its
+        # sub-chain actually contains a requested particle.
+        #
+        # The result for a particle is independent of the path taken to reach
+        # it, so it can be cached on the particle name alone; callers get a
+        # deepcopy since they mutate the returned dicts in place.
+        @cache
+        def _cached_recurse_raw(
+            p_name: str,
+        ) -> dict[tuple[int, ...], tuple[DecayModeDict, ...]]:
+            in_progress.append(p_name)
+            try:
+                combined: dict[tuple[int, ...], list[tuple[int, DecayModeDict]]] = {}
+                for index, dm in _modes_in_pruning_order(p_name):
+                    d = self._decay_mode_details(dm, display_photos_keyword=False)
+
+                    if minimum_step_bf is not None and d["bf"] <= minimum_step_bf:
+                        if sort_for_pruning:
+                            break
                         continue
 
-                    try:
-                        assert isinstance(fs, str)
-
-                        _info = self.build_decay_chains_to_inclusive_fsp(
-                            mother=fs,
-                            fsp=fsp_list,
-                            stable_particles=stable_particles_tuple,
-                            multi=True,
-                            only_direct_daughters=False,
+                    # All the FSPs (with multiplicities) are already direct
+                    # daughters: stop there and return the mode unexpanded.
+                    direct_counts = empty_counts
+                    for daughter in cast(list[str], d["fs"]):
+                        if daughter in target_index:
+                            counts = list(direct_counts)
+                            counts[target_index[daughter]] += 1
+                            direct_counts = tuple(counts)
+                    if all(
+                        found >= needed
+                        for found, needed in zip(
+                            direct_counts, needed_counts, strict=True
                         )
-                        if len(_info[fs]) > 0:
-                            d["fs"][i] = _info  # type: ignore[index]
-                            append = True
-                    # if fs does not have decays defined in the parsed file
-                    except DecayNotFound:
-                        pass
-                if append:
-                    info.append(d)
+                    ):
+                        combined.setdefault(needed_counts, []).append((index, d))
+                        continue
 
-        return {mother: info}
+                    # All ways to choose, per daughter, how it contributes to the
+                    # count vector found so far. A daughter is expanded whenever
+                    # one of its sub-chains contains a requested particle; all
+                    # its sub-modes with a given count vector are grouped
+                    # together, so picking any of them contributes at least
+                    # that count vector.
+                    combos: dict[tuple[int, ...], list[list[str | DecayChainDict]]] = {
+                        empty_counts: [[]]
+                    }
+                    for daughter in cast(list[str], d["fs"]):
+                        daughter_counts = list(empty_counts)
+                        if daughter in target_index:
+                            daughter_counts[target_index[daughter]] = 1
+                        daughter_counts_tuple = tuple(daughter_counts)
+                        expanded: dict[tuple[int, ...], DecayChainDict] = {}
+                        if daughter not in stable_set:
+                            if daughter in in_progress:
+                                cycle = " -> ".join([*in_progress, daughter])
+                                raise ValueError(
+                                    f"Cycle detected in decay chain: {cycle}"
+                                )
+                            try:
+                                sub_chains = _cached_recurse_raw(daughter)
+                            # if daughter has no decays defined in the file
+                            except DecayNotFound:
+                                sub_chains = {}
+                            for sub_counts, sub_modes in sub_chains.items():
+                                expanded[sub_counts] = {
+                                    daughter: [
+                                        copy.deepcopy(sub_mode)
+                                        for sub_mode in sub_modes
+                                    ]
+                                }
+                        new_combos: dict[
+                            tuple[int, ...], list[list[str | DecayChainDict]]
+                        ] = {}
+                        for counts, choices_list in combos.items():
+                            if expanded:
+                                for sub_counts, sub_chain in expanded.items():
+                                    new_combos.setdefault(
+                                        _add_counts(
+                                            _add_counts(counts, daughter_counts_tuple),
+                                            sub_counts,
+                                        ),
+                                        [],
+                                    ).extend(
+                                        [*choices, copy.deepcopy(sub_chain)]
+                                        for choices in choices_list
+                                    )
+                            else:
+                                # Leave the daughter unexpanded.
+                                new_combos.setdefault(
+                                    _add_counts(counts, daughter_counts_tuple), []
+                                ).extend(
+                                    [*choices, daughter] for choices in choices_list
+                                )
+                        combos = new_combos
+                        if not combos:
+                            break
 
+                    for counts, choices_list in combos.items():
+                        if not any(counts):
+                            continue
+                        for choices in choices_list:
+                            combined.setdefault(counts, []).append(
+                                (
+                                    index,
+                                    DecayModeDict(
+                                        bf=d["bf"],
+                                        fs=choices,
+                                        model=d["model"],
+                                        model_params=d["model_params"],
+                                    ),
+                                )
+                            )
+            finally:
+                in_progress.pop()
+            result: dict[tuple[int, ...], tuple[DecayModeDict, ...]] = {}
+            for counts, modes in combined.items():
+                if sort_for_pruning:
+                    # Sorting is only an internal pruning aid; return source order.
+                    modes.sort(key=lambda item: item[0])
+                result[counts] = tuple(d for _, d in modes)
+            return result
+
+        def _recurse(
+            p_name: str,
+        ) -> dict[tuple[int, ...], tuple[DecayModeDict, ...]]:
+            return copy.deepcopy(_cached_recurse_raw(p_name))
+
+        return {mother: list(_recurse(mother).get(needed_counts, ()))}
 
     def build_decay_chains_to_specific_fsp(
         self,
         mother: str,
-        stable_particles: Iterable[str] = (),
-        fsp: Iterable[str] | None = None,
-        minimum_step_bf: float | None = 1e-4,
+        fsp: str | Iterable[str],
+        stable_particles: str | Iterable[str] = (),
+        minimum_step_bf: float | None = None,
     ) -> dict[str, list[DecayModeDict]]:
         """
         Build decay chains whose stable final state is exactly ``fsp``.
@@ -1733,12 +1925,14 @@ Continuing but be warned of possible side effects ..."""
         ----------
         mother : str
             Input mother particle name.
-        stable_particles : iterable of str, optional
+        fsp : str or iterable of str
+            Final-state particles to search for. A single string is treated as
+            one particle. Multiplicities matter.
+        stable_particles : str or iterable of str, optional
             Additional particles to treat as stable. They must appear in
-            ``fsp`` to be part of a valid chain.
-        fsp : iterable of str, optional
-            Final-state particles to search for. Multiplicities matter.
-        minimum_step_bf : float or None, optional
+            ``fsp`` to be part of a valid chain. A single string is treated
+            as one particle.
+        minimum_step_bf : float or None, optional, default=None
             Minimum branching fraction required at every decay step. If
             ``None``, no per-step BF cut is applied.
 
@@ -1748,39 +1942,18 @@ Continuing but be warned of possible side effects ..."""
             ``{mother: [decay mode dicts]}`` in the same format as
             :meth:`build_decay_chains`.
         """
-        if fsp is None:
-            fsp = []
-        elif isinstance(fsp, str):
-            fsp = [fsp]
-
-        needed = list(fsp)
+        needed = list(self._normalize_particle_names(fsp, "fsp"))
 
         # FSPs are final-state particles.
-        stable_set = set(stable_particles) | set(needed)
+        stable_set = set(
+            self._normalize_particle_names(stable_particles, "stable_particles")
+        ) | set(needed)
         needed_key = tuple(sorted(needed))
 
         # Sorting by BF lets us stop at the first mode below the per-step cut.
         sort_for_pruning = minimum_step_bf is not None and minimum_step_bf > 0
 
-        ordered_modes: dict[str, tuple[tuple[int, Any], ...]] = {}
-
-        def _modes_in_pruning_order(p_name: str) -> tuple[tuple[int, Any], ...]:
-            try:
-                return ordered_modes[p_name]
-            except KeyError:
-                modes = self._find_decay_modes(p_name)
-                if not sort_for_pruning:
-                    ordered = tuple(enumerate(modes))
-                else:
-                    ordered = tuple(
-                        sorted(
-                            enumerate(modes),
-                            key=lambda item: get_branching_fraction(item[1]),
-                            reverse=True,
-                        )
-                    )
-                ordered_modes[p_name] = ordered
-                return ordered
+        _modes_in_pruning_order = self._modes_in_pruning_order_factory(sort_for_pruning)
 
         def _is_submultiset(sub: tuple[str, ...], items: tuple[str, ...]) -> bool:
             """Whether ``sub`` is a sub-multiset of ``items``; both are sorted."""
@@ -1943,6 +2116,7 @@ Continuing but be warned of possible side effects ..."""
 
     def __str__(self) -> str:
         return repr(self)
+
 
 class DecayModelAliasReplacement(Transformer):  # type: ignore[misc]
     """
